@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: i-scheduler-extender
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: i-scheduler-extender
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: ["pods/binding"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: i-scheduler-extender
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: i-scheduler-extender
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: i-scheduler-extender
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: i-scheduler-extender
+  namespace: kube-system
+spec:
+  selector:
+    component: i-scheduler-extender
+    tier: control-plane
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: i-scheduler-extender
+  namespace: kube-system
+  labels:
+    component: i-scheduler-extender
+    tier: control-plane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: i-scheduler-extender
+      tier: control-plane
+  template:
+    metadata:
+      labels:
+        component: i-scheduler-extender
+        tier: control-plane
+    spec:
+      serviceAccountName: i-scheduler-extender
+      containers:
+        - name: i-scheduler-extender
+          image: lixd96/i-scheduler-extender:v1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --check-interval=5
+            - --cpu-weight=0.1
+            - --mem-weight=0.9
+            - --high-threshold=70
+            - --recovery-threshold=65
+            - --min-schedulable-nodes=4
+            - --top-nodes-count=9
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10

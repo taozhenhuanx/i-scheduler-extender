@@ -24,7 +24,7 @@ metadata:
   namespace: kube-system
 data:
   i-scheduler-extender.yaml: |
-    apiVersion: kubescheduler.config.k8s.io/v1
+    apiVersion: kubescheduler.config.k8s.io/v1beta2
     kind: KubeSchedulerConfiguration
     profiles:
       - schedulerName: i-scheduler-extender
@@ -35,9 +35,20 @@ data:
       enableHTTPS: false
       filterVerb: "filter"
       prioritizeVerb: "prioritize"
-      bindVerb: "bind"
-      weight: 1
+      bindVerb: bind
       nodeCacheCapable: false
+      weight: 1
+      # managedResources:
+      # - name: nvidia.com/gpu
+      #   ignoredByScheduler: true
+      # - name: nvidia.com/gpumem
+      #   ignoredByScheduler: true
+      # - name: nvidia.com/gpucores
+      #   ignoredByScheduler: true
+      # - name: nvidia.com/gpumem-percentage
+      #   ignoredByScheduler: true
+      # - name: nvidia.com/priority
+      #   ignoredByScheduler: true
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -62,7 +73,8 @@ spec:
       serviceAccountName: i-scheduler-extender
       containers:
         - name: kube-scheduler
-          image: registry.k8s.io/kube-scheduler:v1.29.0
+          image: registry.aliyuncs.com/google_containers/kube-scheduler:v1.22.9
+          imagePullPolicy: IfNotPresent
           command:
             - kube-scheduler
             - --config=/etc/kubernetes/i-scheduler-extender.yaml
@@ -85,6 +97,15 @@ spec:
               mountPath: /etc/kubernetes
         - name: i-scheduler-extender
           image: lixd96/i-scheduler-extender:v1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --check-interval=5
+            - --cpu-weight=0.1
+            - --mem-weight=0.9
+            - --high-threshold=70
+            - --recovery-threshold=65
+            - --min-schedulable-nodes=4
+            - --top-nodes-count=9
           ports:
             - containerPort: 8080
       volumes:

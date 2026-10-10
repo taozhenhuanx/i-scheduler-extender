@@ -9,6 +9,7 @@ import (
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
+// Handler 处理器
 type Handler struct {
 	ex *extender.Extender
 }
@@ -28,8 +29,10 @@ func (h *Handler) Filter(w http.ResponseWriter, r *http.Request) {
 	var args extenderv1.ExtenderArgs
 	var result *extenderv1.ExtenderFilterResult
 
+	// 传进来的Body Decode给args
 	err := json.NewDecoder(r.Body).Decode(&args)
 	if err != nil {
+		// 返回结果？
 		result = &extenderv1.ExtenderFilterResult{
 			Error: err.Error(),
 		}
