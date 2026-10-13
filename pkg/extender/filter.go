@@ -76,15 +76,15 @@ func (ex *Extender) FilterWithContext(ctx context.Context, args extenderv1.Exten
 		projectedPercent := memoryPercent(projectedMemory, memoryCapacity)
 		isBlocked := node.Labels[memoryBlockedLabel] == "true"
 
-		if isBlocked {
-			if currentPercent > memoryRecoveryPercent || projectedPercent > memoryBlockThresholdPercent {
-				continue
-			}
+		switch decideMemoryGuard(currentPercent, projectedPercent, isBlocked) {
+		case memoryGuardKeepBlocked:
+			continue
+		case memoryGuardRecover:
 			if err := ex.setMemoryBlocked(ctx, node.Name, false); err != nil {
 				klog.Errorf("[Filter] failed to clear memory block label on node %q: %v", node.Name, err)
 				continue
 			}
-		} else if projectedPercent > memoryBlockThresholdPercent {
+		case memoryGuardBlock:
 			if err := ex.setMemoryBlocked(ctx, node.Name, true); err != nil {
 				klog.Errorf("[Filter] failed to set memory block label on node %q: %v", node.Name, err)
 			}
@@ -121,12 +121,13 @@ func (ex *Extender) FilterOnlyOneWithContext(ctx context.Context, args extenderv
 	filteredArgs := args
 	filteredArgs.Nodes = filtered.Nodes
 	scores := ex.PrioritizeWithContext(ctx, filteredArgs)
-	if len(scores) == 0 {
+	if scores == nil || len(*scores) == 0 {
 		return filtered
 	}
-	maxScore := scores[0].Score
-	bestNames := make([]string, 0, len(scores))
-	for _, score := range scores {
+	scoreList := *scores
+	maxScore := scoreList[0].Score
+	bestNames := make([]string, 0, len(scoreList))
+	for _, score := range scoreList {
 		if score.Score > maxScore {
 			maxScore = score.Score
 			bestNames = bestNames[:0]

@@ -89,21 +89,21 @@ func (ex *Extender) BindWithContext(ctx context.Context, args extenderv1.Extende
 	currentPercent := memoryPercent(memoryUsed, memoryCapacity)
 	projectedPercent := memoryPercent(memoryUsed+podMemory, memoryCapacity)
 
-	if node.Labels[memoryBlockedLabel] == "true" {
-		if currentPercent > memoryRecoveryPercent || projectedPercent > memoryBlockThresholdPercent {
-			result.Error = fmt.Sprintf("node %q is blocked by the %.0f%% memory guard", args.Node, memoryBlockThresholdPercent)
-			return result
-		}
-		if err := ex.setMemoryBlocked(ctx, args.Node, false); err != nil {
-			result.Error = fmt.Sprintf("clear memory block label on node %q: %v", args.Node, err)
-			return result
-		}
-	} else if projectedPercent > memoryBlockThresholdPercent {
+	switch decideMemoryGuard(currentPercent, projectedPercent, node.Labels[memoryBlockedLabel] == "true") {
+	case memoryGuardKeepBlocked:
+		result.Error = fmt.Sprintf("node %q is blocked by the %.0f%% memory guard", args.Node, memoryBlockThresholdPercent)
+		return result
+	case memoryGuardBlock:
 		if err := ex.setMemoryBlocked(ctx, args.Node, true); err != nil {
 			klog.ErrorS(err, "Failed to label node at memory threshold", "node", args.Node)
 		}
 		result.Error = fmt.Sprintf("binding pod would raise node %q memory to %.2f%%, above %.0f%%", args.Node, projectedPercent, memoryBlockThresholdPercent)
 		return result
+	case memoryGuardRecover:
+		if err := ex.setMemoryBlocked(ctx, args.Node, false); err != nil {
+			result.Error = fmt.Sprintf("clear memory block label on node %q: %v", args.Node, err)
+			return result
+		}
 	}
 
 	ex.reservePodMemory(args.PodNamespace, args.PodName, args.Node, podMemory)

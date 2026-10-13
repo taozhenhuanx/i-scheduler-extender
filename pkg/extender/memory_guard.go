@@ -22,6 +22,29 @@ const (
 	pendingMemoryReservationTTL = 10 * time.Minute
 )
 
+type memoryGuardDecision uint8
+
+const (
+	memoryGuardAllow memoryGuardDecision = iota
+	memoryGuardBlock
+	memoryGuardKeepBlocked
+	memoryGuardRecover
+)
+
+// decideMemoryGuard 根据当前和预计内存占比决定放行、拦截或恢复节点标签。
+func decideMemoryGuard(currentPercent, projectedPercent float64, isBlocked bool) memoryGuardDecision {
+	if isBlocked {
+		if currentPercent > memoryRecoveryPercent || projectedPercent > memoryBlockThresholdPercent {
+			return memoryGuardKeepBlocked
+		}
+		return memoryGuardRecover
+	}
+	if projectedPercent > memoryBlockThresholdPercent {
+		return memoryGuardBlock
+	}
+	return memoryGuardAllow
+}
+
 type podMemorySnapshot struct {
 	requestsByNode map[string]int64
 	nodeByPod      map[string]string
