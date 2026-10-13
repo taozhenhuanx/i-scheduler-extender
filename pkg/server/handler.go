@@ -37,7 +37,7 @@ func (h *Handler) Filter(w http.ResponseWriter, r *http.Request) {
 			Error: err.Error(),
 		}
 	} else {
-		result = h.ex.Filter(args)
+		result = h.ex.FilterWithContext(r.Context(), args)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -64,7 +64,7 @@ func (h *Handler) FilterOnlyOne(w http.ResponseWriter, r *http.Request) {
 			Error: err.Error(),
 		}
 	} else {
-		result = h.ex.FilterOnlyOne(args)
+		result = h.ex.FilterOnlyOneWithContext(r.Context(), args)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -89,7 +89,7 @@ func (h *Handler) Prioritize(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		result = &extenderv1.HostPriorityList{}
 	} else {
-		result = h.ex.Prioritize(args)
+		result = h.ex.PrioritizeWithContext(r.Context(), args)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -116,7 +116,7 @@ func (h *Handler) Bind(w http.ResponseWriter, r *http.Request) {
 			Error: err.Error(),
 		}
 	} else {
-		result = h.ex.Bind(args)
+		result = h.ex.BindWithContext(r.Context(), args)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

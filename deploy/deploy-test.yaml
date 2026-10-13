@@ -18,3 +18,8 @@ spec:
           name: nginx
           command: ["sleep"]
           args: ["99999"]
+          resources:
+            requests:
+              memory: 64Mi
+            limits:
+              memory: 128Mi

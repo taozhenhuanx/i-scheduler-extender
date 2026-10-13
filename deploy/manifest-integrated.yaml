@@ -5,26 +5,33 @@ metadata:
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   name: i-scheduler-extender
-  namespace: kube-system
 rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["pods/binding"]
     verbs: ["create"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
   name: i-scheduler-extender
-  namespace: kube-system
 subjects:
   - kind: ServiceAccount
     name: i-scheduler-extender
     namespace: kube-system
 roleRef:
-  kind: Role
+  kind: ClusterRole
   name: i-scheduler-extender
   apiGroup: rbac.authorization.k8s.io
 ---
@@ -52,6 +59,8 @@ metadata:
     tier: control-plane
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       component: i-scheduler-extender

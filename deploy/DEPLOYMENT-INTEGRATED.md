@@ -25,6 +25,7 @@ Scheduler Extender 本身只是 HTTP 服务，不能脱离 kube-scheduler 工作
 
 - 具有修改控制平面 kube-scheduler 配置的权限；
 - 能够在集群中部署一个 HTTP 服务；
+- Metrics Server 正常运行，`kubectl top nodes` 可以返回数据；
 - extender 镜像已经构建并推送到集群可访问的镜像仓库。
 
 构建镜像示例：
@@ -48,26 +49,33 @@ metadata:
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   name: i-scheduler-extender
-  namespace: kube-system
 rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["pods/binding"]
     verbs: ["create"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
   name: i-scheduler-extender
-  namespace: kube-system
 subjects:
   - kind: ServiceAccount
     name: i-scheduler-extender
     namespace: kube-system
 roleRef:
-  kind: Role
+  kind: ClusterRole
   name: i-scheduler-extender
   apiGroup: rbac.authorization.k8s.io
 ---
@@ -95,6 +103,8 @@ metadata:
     tier: control-plane
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       component: i-scheduler-extender
@@ -131,7 +141,7 @@ kubectl -n kube-system rollout status deploy/i-scheduler-extender
 kubectl -n kube-system get pod,svc i-scheduler-extender
 ```
 
-这里的 RBAC 只允许 extender 执行 Bind 所需的 `pods/binding` 创建操作，不再使用原清单中的 `cluster-admin`。如果项目后续增加了访问其他 Kubernetes 资源的代码，再按实际 API 调用补充权限。
+这里的 ClusterRole 是 Extender 当前行为所需的集群级最小权限：读取、列出和更新 Node 标签，列出 Pod 以统计已分配内存预算，跨命名空间创建 `pods/binding`，并读取 `metrics.k8s.io/nodes`。不再使用 `cluster-admin`。
 
 ## 4. 修改现有 kube-scheduler 配置
 
@@ -212,6 +222,11 @@ spec:
           image: busybox:1.36
           command: ["sleep"]
           args: ["99999"]
+          resources:
+            requests:
+              memory: 64Mi
+            limits:
+              memory: 128Mi
 ```
 
 部署测试：
@@ -222,11 +237,11 @@ kubectl get pod -o wide
 kubectl describe pod -l app=test
 ```
 
-当前 extender 的 Filter 逻辑要求节点存在 `priority.lixueduan.com` 标签。测试前至少给一个节点打标签：
+调度打分按节点实时加权 CPU、内存使用率计算，不需要给节点添加优先级标签。Filter 会在预估调度后内存超过 80% 时标记并排除节点，内存 request/limit 预算降到 75% 后解除标签。Pod 必须声明正数的内存 request 或 limit。部署前确认 `kubectl top nodes` 正常，ServiceAccount 可以读取 `metrics.k8s.io/nodes` 和集群 Pod 列表。
 
-```bash
-kubectl label node <node-name> priority.lixueduan.com=10
-```
+80% 是基于 Metrics API 和 Pod 内存预算的调度预测门槛，不是节点物理内存的绝对上限。指标有采样延迟，Pod 可能超过 request（特别是没有 limit 时），未经过此 Extender 的调度路径也不会被它拦截。`scheduler.example.com/memory-blocked=true` 标签用于识别和观测，实际调度拦截由 Extender 的 Filter/Bind 执行。
+
+内存预约保存在 Extender 进程内，因此请保持 `replicas: 1`。清单使用 `Recreate`，避免升级期间新旧实例同时接收调度请求。
 
 正常情况下，Pod 的 `Scheduled` 事件来源会显示默认调度器，但调度请求也会出现在 extender 日志中；调度结果仍受该 extender 的 Filter/Prioritize/Bind 逻辑影响。
 
@@ -261,7 +276,7 @@ kubectl label node <node-name> priority.lixueduan.com=10
 ACK 托管集群建议按下面的优先级选择方案：
 
 1. **优先使用 ACK/阿里云已支持的调度扩展能力**。如果当前 ACK 版本和集群规格提供调度插件、调度策略或调度器扩展能力，按照 ACK 控制台和对应版本文档配置；这类能力由 ACK 负责修改或管理控制面，不能直接套用本项目的 legacy Scheduler Extender 配置。
-2. **将逻辑改造成 Kubernetes 原生调度约束**。本项目当前的 Filter 逻辑是要求节点存在 `priority.lixueduan.com`，Prioritize 逻辑是按该标签打分。简单场景可直接使用 `nodeSelector`、`nodeAffinity`、拓扑约束等字段，通常不需要额外调度器。
+2. **将逻辑改造成 Kubernetes 原生调度约束**。简单的硬约束可使用 `nodeSelector`、`nodeAffinity`、拓扑约束等字段，通常不需要额外调度器。动态资源负载评分仍需要相应的调度扩展能力。
 3. **运行独立的自定义 kube-scheduler**。如果必须继续使用本项目的 Scheduler Extender，就在 ACK 中以普通 Deployment 运行自定义调度器，并使用独立的 scheduler name；这是托管控制面无法修改时最通用的方案。
 
 ### 8.2 ACK 中部署独立调度器

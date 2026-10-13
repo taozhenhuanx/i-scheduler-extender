@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"github.com/lixd96/i-scheduler-extender/pkg/extender"
+	"github.com/lixd96/i-scheduler-extender/pkg/nodeusage"
 	"github.com/lixd96/i-scheduler-extender/pkg/rebalancer"
 	"github.com/lixd96/i-scheduler-extender/pkg/server"
 )
 
 func main() {
-	// 节点保护参数全部来自启动参数；修改配置后重启该 Deployment 生效。
+	// 负载评分和节点保护参数来自启动参数；修改配置后重启该 Deployment 生效。
 	checkInterval := flag.Int("check-interval", 5, "节点检查间隔，单位：秒")
 	cpuWeight := flag.String("cpu-weight", "0.1", "CPU 权重，支持 0.1、10 或 10%")
 	memWeight := flag.String("mem-weight", "0.9", "内存权重，支持 0.9、90 或 90%")
@@ -39,8 +40,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid ignored nodes: %v", err)
 	}
+	cpuScoreWeight, memoryScoreWeight, err := nodeusage.ParseWeights(*cpuWeight, *memWeight)
+	if err != nil {
+		log.Fatalf("invalid scoring weights: %v", err)
+	}
 
-	ex := extender.NewExtender()
+	ex := extender.NewExtenderWithWeights(cpuScoreWeight, memoryScoreWeight)
 	h := server.NewHandler(ex)
 	config := rebalancer.Config{
 		CheckInterval:       time.Duration(*checkInterval) * time.Second,

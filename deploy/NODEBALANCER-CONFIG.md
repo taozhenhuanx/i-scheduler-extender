@@ -1,6 +1,6 @@
 # 节点负载保护启动参数说明
 
-本服务不读取 `NodeBalancer` CRD，也不依赖 Operator。所有节点保护参数都在进程启动时通过命令行参数传入。修改参数后，需要更新 Deployment 并滚动重启 Pod。
+本服务不读取 `NodeBalancer` CRD，也不依赖 Operator。所有节点保护参数都在进程启动时通过命令行参数传入。`--cpu-weight` 和 `--mem-weight` 也控制调度阶段按实时负载计算的 Node 分数。修改参数后，需要更新 Deployment 并滚动重启 Pod。
 
 ## 参数
 
@@ -13,6 +13,10 @@
 - `--top-nodes-count=9`：只处理综合使用率最高的前 9 个节点。
 - `--node-selector=key=value`：节点白名单；只有匹配标签的节点参与评估。多个标签用逗号分隔。
 - `--ignore-nodes=node-a,node-b`：按节点名排除，不参与评估和 cordon。
+
+调度评分复用相同的 CPU、内存权重，并将加权使用率映射到 0–10 分，负载越低分数越高。它使用全部可行节点，不受节点保护的白名单和忽略列表影响。
+
+Filter 另有内存硬保护：按 Metrics API 实测内存和已分配 Pod 的内存预算估算，加上新 Pod 的内存 request/limit；超过 Allocatable 的 80% 时设置 `scheduler.example.com/memory-blocked=true` 并排除节点。估算降到 75% 后清除该标签。Pod 必须声明正数的内存 request 或 limit。
 
 ## 当前 Top N 语义
 

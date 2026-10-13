@@ -2,7 +2,9 @@
 
 ## 1. 方案说明
 
-当前版本不读取 `NodeBalancer` CRD，也不运行 Operator。节点保护参数全部通过进程启动参数传入。程序只通过 `metrics.k8s.io/v1beta1` 读取节点实际 CPU 和内存使用率。
+当前版本不读取 `NodeBalancer` CRD，也不运行 Operator。调度打分和节点保护通过 `metrics.k8s.io/v1beta1` 读取节点实际 CPU 和内存使用率。调度 Filter 还会按已调度 Pod 的内存 request/limit 与新 Pod 的 request/limit 预估内存占用；超过节点 Allocatable 的 80% 时标记节点并拒绝新 Pod，降至 75% 后解除标记。
+
+80% 是调度预测门槛，不是物理内存绝对上限：Metrics API 存在采样延迟，Pod 可能超过 request，且未经过此 Extender 的调度路径不受拦截。实际拒绝由 Extender 的 Filter/Bind 执行。
 
 项目提供两种部署方式：
 
@@ -55,7 +57,7 @@ args:
 参数说明：
 
 - `--check-interval`：检查周期，单位为秒；
-- `--cpu-weight`、`--mem-weight`：CPU 和内存使用率权重；
+- `--cpu-weight`、`--mem-weight`：调度打分和节点保护共用的 CPU、内存使用率权重；
 - `--high-threshold`：综合使用率达到该值后进入 cordon 候选；
 - `--recovery-threshold`：综合使用率低于该值时才恢复自动 cordon 的节点；
 - `--min-schedulable-nodes`：至少保留的可调度节点数量；
@@ -113,11 +115,15 @@ spec:
 
 ### 5.2 测试
 
-当前 Extender 的 Filter 逻辑要求节点存在 `priority.lixueduan.com` 标签。测试前执行：
+Extender 根据实时加权使用率给内存安全的候选节点打 0–10 分，负载越低分数越高。默认权重是 CPU 10%、内存 90%；动态评分遇到指标错误时会返回中性分。内存保护则会在无法读取 Metrics API 或集群 Pod 列表时拒绝本轮调度，以免在未知容量下放行 Pod。Metrics API 本地缓存时间为 5 秒。
+
+测试前确认 Metrics Server 可用：
 
 ```bash
-kubectl label node <node-name> priority.lixueduan.com=10
+kubectl top nodes
 ```
+
+无需给节点添加优先级标签。测试 Pod 必须声明正数的内存 request 或 limit；调度时按 request/limit 中较大的值计算。
 
 测试 Pod：
 
@@ -132,6 +138,11 @@ spec:
     - name: test
       image: busybox:1.36
       command: ["sleep", "3600"]
+      resources:
+        requests:
+          memory: 64Mi
+        limits:
+          memory: 128Mi
 ```
 
 检查：
@@ -190,11 +201,12 @@ extenders:
 
 ```text
 core/nodes            get, list, patch
+core/pods             get, list
 core/pods/binding     create
 metrics.k8s.io/nodes  get, list
 ```
 
-`manifest.yaml` 为了示例快速运行使用了 `cluster-admin`，生产环境应拆分 ServiceAccount 并收紧权限。`manifest-integrated.yaml` 中原有的 `pods/binding` Role 只覆盖 Bind，不足以支持节点负载保护；采用集成方式前，需要由集群管理员审核并补充 Node 和 Metrics API 的最小权限。
+`manifest.yaml` 为了示例快速运行使用了 `cluster-admin`，生产环境应拆分 ServiceAccount 并收紧权限。`manifest-integrated.yaml` 的 ClusterRole 按当前代码授予上述权限：读取 Metrics API、统计 Pod 内存预算、维护 Node 内存保护标签，以及执行 Bind。
 
 ## 7. ACK 托管集群
 
@@ -282,8 +294,10 @@ kubectl delete -f deploy/manifest-integrated.yaml
 
 - `kubectl top nodes` 正常；
 - `top-nodes-count`、`min-schedulable-nodes` 与节点总数匹配；
-- 已设置节点白名单，避免误处理控制平面或特殊用途节点；
-- 已确认 `priority.lixueduan.com` 标签和 Filter 逻辑符合业务预期；
+- 已设置节点白名单，避免节点保护逻辑处理控制平面或特殊用途节点；
+- Extender ServiceAccount 可以读取 Metrics API；
+- 工作负载设置了内存 request 或 limit；
+- 已确认 `scheduler.example.com/memory-blocked` 标签由 Extender 管理，且 75% 恢复阈值符合预期；
 - 已确认 cordon 不会驱逐已有 Pod；
 - 已将 `cluster-admin` 替换为审核后的最小 RBAC；
 - 已验证 scheduler、Extender、Metrics API Server 之间的网络连通性；

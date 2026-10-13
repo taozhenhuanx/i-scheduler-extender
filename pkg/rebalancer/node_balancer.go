@@ -10,23 +10,17 @@ import (
 	"fmt"
 	"log"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/lixd96/i-scheduler-extender/pkg/nodeusage"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
-)
-
-var (
-	nodeMetricsGVR = schema.GroupVersionResource{Group: "metrics.k8s.io", Version: "v1beta1", Resource: "nodes"}
 )
 
 const autoCordonAnnotation = "scheduler.example.com/auto-cordoned"
@@ -60,7 +54,7 @@ func New(client kubernetes.Interface, dynamicClient dynamic.Interface, config Co
 	if client == nil || dynamicClient == nil {
 		return nil, fmt.Errorf("kubernetes and dynamic clients are required")
 	}
-	cpuWeight, memoryWeight, err := parseWeights(config.CPUWeight, config.MemoryWeight)
+	cpuWeight, memoryWeight, err := nodeusage.ParseWeights(config.CPUWeight, config.MemoryWeight)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +94,7 @@ func (b *Balancer) reconcile(ctx context.Context) {
 		log.Printf("[node-balancer] list nodes failed: %v", err)
 		return
 	}
-	metrics, err := b.dynamicClient.Resource(nodeMetricsGVR).List(ctx, metav1.ListOptions{})
+	metrics, err := b.dynamicClient.Resource(nodeusage.NodeMetricsGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		log.Printf("[node-balancer] list node metrics failed: %v", err)
 		return
@@ -124,7 +118,7 @@ func (b *Balancer) reconcile(ctx context.Context) {
 		if !ok {
 			continue
 		}
-		percentage, err := weightedUsagePercentage(node, metric.Object, b.cpuWeight, b.memoryWeight)
+		percentage, err := nodeusage.WeightedUsagePercentage(node, metric.Object, b.cpuWeight, b.memoryWeight)
 		if err != nil {
 			log.Printf("[node-balancer] calculate usage for %q failed: %v", node.Name, err)
 			continue
@@ -195,75 +189,6 @@ func validateConfig(config Config) error {
 		return fmt.Errorf("recovery threshold must be >= 0 and lower than high threshold")
 	}
 	return nil
-}
-
-func parseWeights(cpuRaw, memoryRaw string) (float64, float64, error) {
-	cpu, err := parseWeight(cpuRaw)
-	if err != nil {
-		return 0, 0, fmt.Errorf("invalid cpu weight: %w", err)
-	}
-	memory, err := parseWeight(memoryRaw)
-	if err != nil {
-		return 0, 0, fmt.Errorf("invalid memory weight: %w", err)
-	}
-	if cpu+memory <= 0 {
-		return 0, 0, fmt.Errorf("cpu and memory weights cannot both be zero")
-	}
-	return cpu, memory, nil
-}
-
-func weightedUsagePercentage(node corev1.Node, metric map[string]interface{}, cpuWeight, memoryWeight float64) (float64, error) {
-	usage, ok, err := unstructured.NestedMap(metric, "usage")
-	if err != nil || !ok {
-		return 0, fmt.Errorf("metrics usage is missing")
-	}
-	cpu, err := metricQuantity(usage, "cpu")
-	if err != nil {
-		return 0, fmt.Errorf("parse cpu usage: %w", err)
-	}
-	memory, err := metricQuantity(usage, "memory")
-	if err != nil {
-		return 0, fmt.Errorf("parse memory usage: %w", err)
-	}
-	allocatableCPU := node.Status.Allocatable[corev1.ResourceCPU]
-	allocatableMemory := node.Status.Allocatable[corev1.ResourceMemory]
-	if allocatableCPU.IsZero() || allocatableMemory.IsZero() {
-		return 0, fmt.Errorf("node allocatable CPU or memory is zero")
-	}
-	cpuPercentage := float64(cpu.MilliValue()) / float64(allocatableCPU.MilliValue()) * 100
-	memoryPercentage := float64(memory.Value()) / float64(allocatableMemory.Value()) * 100
-	totalWeight := cpuWeight + memoryWeight
-	return (cpuPercentage*cpuWeight + memoryPercentage*memoryWeight) / totalWeight, nil
-}
-
-func metricQuantity(usage map[string]interface{}, name string) (resource.Quantity, error) {
-	raw, ok := usage[name].(string)
-	if !ok {
-		return resource.Quantity{}, fmt.Errorf("%s is missing or is not a string", name)
-	}
-	return resource.ParseQuantity(raw)
-}
-
-func parseWeight(raw string) (float64, error) {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return 0, fmt.Errorf("weight is empty")
-	}
-	if strings.HasSuffix(value, "%") {
-		parsed, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(value, "%")), 64)
-		if err != nil {
-			return 0, err
-		}
-		return parsed / 100, nil
-	}
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return 0, err
-	}
-	if parsed > 1 {
-		return parsed / 100, nil
-	}
-	return parsed, nil
 }
 
 func ParseNodeSelector(raw string) (map[string]string, error) {
