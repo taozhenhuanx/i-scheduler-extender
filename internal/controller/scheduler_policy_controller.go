@@ -1,0 +1,181 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"reflect"
+	"strconv"
+	"time"
+
+	schedulerv1alpha1 "github.com/lixd96/i-scheduler-extender/api/v1alpha1"
+	"github.com/lixd96/i-scheduler-extender/pkg/extender"
+	"github.com/lixd96/i-scheduler-extender/pkg/rebalancer"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	meta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+)
+
+const (
+	clusterPolicyName  = "cluster"
+	clusterRequestName = "cluster"
+	readyConditionType = "Ready"
+	cleanupFinalizer   = "scheduler.example.com/policy-cleanup"
+)
+
+// +kubebuilder:rbac:groups=scheduler.example.com,resources=schedulerpolicies,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=scheduler.example.com,resources=schedulerpolicies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;patch;update
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/binding,verbs=create
+// +kubebuilder:rbac:groups=metrics.k8s.io,resources=nodes,verbs=get;list
+
+// SchedulerPolicyReconciler applies the cluster-wide SchedulerPolicy named "cluster".
+type SchedulerPolicyReconciler struct {
+	client.Client
+	KubernetesClient kubernetes.Interface
+	DynamicClient    dynamic.Interface
+	Extender         *extender.Extender
+}
+
+func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request reconcile.Request) (ctrl.Result, error) {
+	if request.Name != clusterPolicyName {
+		unsupportedPolicy := &schedulerv1alpha1.SchedulerPolicy{}
+		if err := r.Get(ctx, types.NamespacedName{Name: request.Name}, unsupportedPolicy); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+		if err := r.setReadyCondition(ctx, unsupportedPolicy, metav1.ConditionFalse, "UnsupportedName", "the cluster policy must be named cluster"); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update unsupported policy status: %w", err)
+		}
+		return ctrl.Result{}, nil
+	}
+	policy := &schedulerv1alpha1.SchedulerPolicy{}
+	key := types.NamespacedName{Name: clusterPolicyName}
+	if err := r.Get(ctx, key, policy); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if !policy.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(policy, cleanupFinalizer) {
+			if err := rebalancer.UncordonAutoCordonedNodes(ctx, r.KubernetesClient); err != nil {
+				return ctrl.Result{}, err
+			}
+			if err := r.Extender.SetWeights(
+				float64(schedulerv1alpha1.DefaultCPUWeightPercent)/100,
+				float64(schedulerv1alpha1.DefaultMemoryWeightPercent)/100,
+			); err != nil {
+				return ctrl.Result{}, fmt.Errorf("reset Extender weights: %w", err)
+			}
+			controllerutil.RemoveFinalizer(policy, cleanupFinalizer)
+			if err := r.Update(ctx, policy); err != nil {
+				return ctrl.Result{}, fmt.Errorf("remove policy cleanup finalizer: %w", err)
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+	if !controllerutil.ContainsFinalizer(policy, cleanupFinalizer) {
+		controllerutil.AddFinalizer(policy, cleanupFinalizer)
+		if err := r.Update(ctx, policy); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add policy cleanup finalizer: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	config, cpuWeight, memoryWeight, err := balancerConfig(policy.Spec)
+	var balancer *rebalancer.Balancer
+	if err == nil {
+		balancer, err = rebalancer.New(r.KubernetesClient, r.DynamicClient, config)
+	}
+	if err == nil {
+		err = r.Extender.SetWeights(cpuWeight, memoryWeight)
+	}
+	if err == nil {
+		err = balancer.Reconcile(ctx)
+	}
+	if err != nil {
+		if statusErr := r.setReadyCondition(ctx, policy, metav1.ConditionFalse, "ReconcileError", err.Error()); statusErr != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcile scheduler policy: %w (update status: %v)", err, statusErr)
+		}
+		return ctrl.Result{}, err
+	}
+	if err := r.setReadyCondition(ctx, policy, metav1.ConditionTrue, "Reconciled", "scheduler policy was applied"); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update scheduler policy status: %w", err)
+	}
+
+	return ctrl.Result{RequeueAfter: config.CheckInterval}, nil
+}
+
+func (r *SchedulerPolicyReconciler) setReadyCondition(
+	ctx context.Context,
+	policy *schedulerv1alpha1.SchedulerPolicy,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) error {
+	updated := policy.DeepCopy()
+	updated.Status.ObservedGeneration = policy.Generation
+	meta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
+		Type:               readyConditionType,
+		Status:             status,
+		ObservedGeneration: policy.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+	if updated.Status.ObservedGeneration == policy.Status.ObservedGeneration &&
+		reflect.DeepEqual(updated.Status.Conditions, policy.Status.Conditions) {
+		return nil
+	}
+	return r.Status().Update(ctx, updated)
+}
+
+func balancerConfig(spec schedulerv1alpha1.SchedulerPolicySpec) (rebalancer.Config, float64, float64, error) {
+	if spec.CPUWeight+spec.MemoryWeight != 100 {
+		return rebalancer.Config{}, 0, 0, fmt.Errorf("cpuWeight and memoryWeight must sum to 100")
+	}
+	if spec.HighThreshold < 5 || spec.HighThreshold > 100 {
+		return rebalancer.Config{}, 0, 0, fmt.Errorf("highThreshold must be between 5 and 100")
+	}
+	recoveryThreshold := float64(spec.HighThreshold - 5)
+	if spec.RecoveryThreshold != nil {
+		recoveryThreshold = float64(*spec.RecoveryThreshold)
+	}
+	if recoveryThreshold < 0 || recoveryThreshold >= float64(spec.HighThreshold) {
+		return rebalancer.Config{}, 0, 0, fmt.Errorf("recoveryThreshold must be >= 0 and lower than highThreshold")
+	}
+	ignored := make(map[string]struct{}, len(spec.IgnoreNodes))
+	for _, nodeName := range spec.IgnoreNodes {
+		ignored[nodeName] = struct{}{}
+	}
+	return rebalancer.Config{
+		CheckInterval:       time.Duration(spec.CheckIntervalSeconds) * time.Second,
+		CPUWeight:           strconv.FormatInt(int64(spec.CPUWeight), 10),
+		MemoryWeight:        strconv.FormatInt(int64(spec.MemoryWeight), 10),
+		NodeSelector:        spec.NodeSelector,
+		IgnoreNodes:         ignored,
+		HighThreshold:       float64(spec.HighThreshold),
+		RecoveryThreshold:   recoveryThreshold,
+		MinSchedulableNodes: int(spec.MinSchedulableNodes),
+		TopNodesCount:       int(spec.TopNodesCount),
+	}, float64(spec.CPUWeight) / 100, float64(spec.MemoryWeight) / 100, nil
+}
+
+func (r *SchedulerPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	toClusterRequest := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: clusterRequestName}}}
+	})
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&schedulerv1alpha1.SchedulerPolicy{}).
+		Watches(&corev1.Node{}, toClusterRequest).
+		Named("scheduler-policy").
+		Complete(r)
+}

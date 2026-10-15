@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ type Extender struct {
 	// DynamicClient 用于访问 metrics.k8s.io 等非核心 API。
 	DynamicClient dynamic.Interface
 
+	weightsMu    sync.RWMutex
 	cpuWeight    float64
 	memoryWeight float64
 
@@ -42,6 +44,28 @@ type Extender struct {
 	pendingMemMu   sync.Mutex
 	pendingMemory  map[string]pendingMemoryReservation
 	filterTieBreak atomic.Uint64
+}
+
+// SetWeights updates the CPU and memory scoring weights applied to new requests.
+func (ex *Extender) SetWeights(cpuWeight, memoryWeight float64) error {
+	cpuWeight, memoryWeight, err := nodeusage.ParseWeights(
+		strconv.FormatFloat(cpuWeight, 'f', -1, 64),
+		strconv.FormatFloat(memoryWeight, 'f', -1, 64),
+	)
+	if err != nil {
+		return err
+	}
+	ex.weightsMu.Lock()
+	ex.cpuWeight = cpuWeight
+	ex.memoryWeight = memoryWeight
+	ex.weightsMu.Unlock()
+	return nil
+}
+
+func (ex *Extender) scoringWeights() (float64, float64) {
+	ex.weightsMu.RLock()
+	defer ex.weightsMu.RUnlock()
+	return ex.cpuWeight, ex.memoryWeight
 }
 
 func NewExtender() *Extender {
@@ -63,6 +87,11 @@ func NewExtenderWithWeights(cpuWeight, memoryWeight float64) *Extender {
 	if err != nil {
 		log.Fatalf("failed to create dynamic client: %v", err)
 	}
+	return NewExtenderWithClients(clientset, dynamicClient, cpuWeight, memoryWeight)
+}
+
+// NewExtenderWithClients builds an extender with clients owned by the operator manager.
+func NewExtenderWithClients(clientset kubernetes.Interface, dynamicClient dynamic.Interface, cpuWeight, memoryWeight float64) *Extender {
 	return &Extender{
 		ClientSet:     clientset,
 		DynamicClient: dynamicClient,

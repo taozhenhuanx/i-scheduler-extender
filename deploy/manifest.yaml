@@ -23,6 +23,11 @@ metadata:
   name: i-scheduler-extender
   namespace: kube-system
 data:
+  config.yaml: |
+    metricsBindAddress: "0"
+    healthProbeBindAddress: ":8082"
+    extenderBindAddress: ":8080"
+    leaderElection: true
   i-scheduler-extender.yaml: |
     apiVersion: kubescheduler.config.k8s.io/v1beta2
     kind: KubeSchedulerConfiguration
@@ -101,15 +106,26 @@ spec:
           image: lixd96/i-scheduler-extender:v1
           imagePullPolicy: IfNotPresent
           args:
-            - --check-interval=5
-            - --cpu-weight=0.1
-            - --mem-weight=0.9
-            - --high-threshold=70
-            - --recovery-threshold=65
-            - --min-schedulable-nodes=4
-            - --top-nodes-count=9
+            - --config=/etc/i-scheduler-extender/config.yaml
           ports:
             - containerPort: 8080
+            - name: health
+              containerPort: 8082
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/i-scheduler-extender/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
       volumes:
         - name: config-volume
           configMap:

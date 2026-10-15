@@ -1,0 +1,14 @@
+apiVersion: scheduler.example.com/v1alpha1
+kind: SchedulerPolicy
+metadata:
+  name: cluster
+spec:
+  checkIntervalSeconds: 5
+  cpuWeight: 10
+  memoryWeight: 90
+  highThreshold: 70
+  recoveryThreshold: 65
+  minSchedulableNodes: 4
+  topNodesCount: 9
+  nodeSelector: {}
+  ignoreNodes: []

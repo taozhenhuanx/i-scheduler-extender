@@ -1,0 +1,12 @@
+# Send only the Go module and source needed to build the manager.
+**
+!go.mod
+!go.sum
+!api/
+!api/**
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!pkg/
+!pkg/**

@@ -18,6 +18,16 @@ func NewHandler(ex *extender.Extender) *Handler {
 	return &Handler{ex: ex}
 }
 
+func (h *Handler) Routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/filter", h.Filter)
+	mux.HandleFunc("/filter_onlyone", h.FilterOnlyOne)
+	mux.HandleFunc("/priority", h.Prioritize)
+	mux.HandleFunc("/prioritize", h.Prioritize)
+	mux.HandleFunc("/bind", h.Bind)
+	return mux
+}
+
 func (h *Handler) Filter(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 

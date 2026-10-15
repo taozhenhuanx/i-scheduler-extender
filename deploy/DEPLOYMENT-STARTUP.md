@@ -1,13 +1,14 @@
-# i-scheduler-extender 部署文档（启动参数方案）
+# i-scheduler-extender Operator 部署文档
 
 ## 1. 方案说明
 
-当前版本不读取 `NodeBalancer` CRD，也不运行 Operator。调度打分和节点保护通过 `metrics.k8s.io/v1beta1` 读取节点实际 CPU 和内存使用率。调度 Filter 还会按已调度 Pod 的内存 request/limit 与新 Pod 的 request/limit 预估内存占用；超过节点 Allocatable 的 80% 时标记节点并拒绝新 Pod，降至 75% 后解除标记。
+进程由 Kubebuilder/controller-runtime manager 管理。集群级 `SchedulerPolicy/cluster` 是调度策略的期望状态；controller 监听策略和 Node 变化，并按 CR 的 spec 协调节点负载保护和 Scheduler Extender 的打分权重。同一 manager 还托管 Scheduler Extender HTTP 接口。调度打分和节点保护通过 `metrics.k8s.io/v1beta1` 读取节点实际 CPU 和内存使用率。调度 Filter 会按已调度 Pod 的内存 request/limit 与新 Pod 的 request/limit 预估内存占用；超过节点 Allocatable 的 80% 时标记节点并拒绝新 Pod，降至 75% 后解除标记。
 
 80% 是调度预测门槛，不是物理内存绝对上限：Metrics API 存在采样延迟，Pod 可能超过 request，且未经过此 Extender 的调度路径不受拦截。实际拒绝由 Extender 的 Filter/Bind 执行。
 
-项目提供两种部署方式：
+项目提供三种部署方式：
 
+- `make deploy`：通过 Kubebuilder 的 Kustomize 配置安装 CRD、manager 和 Extender Service；首次部署还需要创建 `SchedulerPolicy/cluster`。
 - `manifest.yaml`：在一个 Deployment 中运行自定义 `kube-scheduler` 和 Extender。业务 Pod 需要设置 `schedulerName: i-scheduler-extender`。
 - `manifest-integrated.yaml`：只运行 Extender，复用已有 kube-scheduler。需要把 Extender 配置加入已有 scheduler，业务 Pod 使用默认 scheduler。
 
@@ -39,45 +40,32 @@ make build-image IMG=registry.example.com/platform/i-scheduler-extender:v1
 image: registry.example.com/platform/i-scheduler-extender:v1
 ```
 
-## 4. 启动参数
+## 4. 配置文件
 
-两个部署清单都使用启动参数配置节点保护：
-
-```yaml
-args:
-  - --check-interval=5
-  - --cpu-weight=0.1
-  - --mem-weight=0.9
-  - --high-threshold=70
-  - --recovery-threshold=65
-  - --min-schedulable-nodes=4
-  - --top-nodes-count=9
-```
-
-参数说明：
-
-- `--check-interval`：检查周期，单位为秒；
-- `--cpu-weight`、`--mem-weight`：调度打分和节点保护共用的 CPU、内存使用率权重；
-- `--high-threshold`：综合使用率达到该值后进入 cordon 候选；
-- `--recovery-threshold`：综合使用率低于该值时才恢复自动 cordon 的节点；
-- `--min-schedulable-nodes`：至少保留的可调度节点数量；
-- `--top-nodes-count`：只处理综合使用率最高的前 N 个节点。
-
-可选的节点范围参数：
+进程启动选项集中在 [`../config/manager/scheduler.yaml`](../config/manager/scheduler.yaml)：
 
 ```yaml
-args:
-  - --node-selector=scheduler.example.com/managed=true
-  - --ignore-nodes=node-control-plane-1,node-control-plane-2
+metricsBindAddress: "0"
+healthProbeBindAddress: ":8082"
+extenderBindAddress: ":8080"
+leaderElection: true
 ```
 
-`--node-selector` 是节点白名单，只有匹配标签的节点参与评估；不配置时默认所有节点参与。`--ignore-nodes` 按节点名排除节点。
+该文件只配置 manager、metrics、健康检查和 Extender HTTP 服务，不包含集群调度策略。策略通过集群级 `SchedulerPolicy/cluster` CR 设置：
+
+```bash
+make install
+kubectl wait --for=condition=Established --timeout=60s crd/schedulerpolicies.scheduler.example.com
+kubectl apply -f config/samples/scheduler_v1alpha1_schedulerpolicy.yaml
+```
+
+`SchedulerPolicy` 字段包括检查周期、CPU/内存权重百分比、高负载/恢复阈值、可调度节点下限、Top N、节点标签选择器和忽略节点列表。示例与字段注释见 [`../config/samples/scheduler_v1alpha1_schedulerpolicy.yaml`](../config/samples/scheduler_v1alpha1_schedulerpolicy.yaml) 和 [`../api/v1alpha1/schedulerpolicy_types.go`](../api/v1alpha1/schedulerpolicy_types.go)。更新策略对象后 controller 会自动协调；`kubectl get schedulerpolicy cluster` 可查看 Ready 状态。
 
 ### Top N 语义
 
-`--top-nodes-count=9` 是硬限制：程序按综合使用率从高到低排序，只对前 9 个节点做高负载 cordon 判断。第 10 个节点即使使用率达到 95%，也不会因为本轮 Top N 规则被新 cordon。
+`spec.topNodesCount: 9` 是硬限制：程序按综合使用率从高到低排序，只对前 9 个节点做高负载 cordon 判断。第 10 个节点即使使用率达到 95%，也不会因为本轮 Top N 规则被新 cordon。
 
-如果希望所有受管节点都有机会参与处理，应将它设置为不小于白名单节点数量。`--min-schedulable-nodes` 优先级更高，不能因为 Top N 导致可调度节点少于该值。
+如果希望所有受管节点都有机会参与处理，应将它设置为不小于白名单节点数量。`spec.minSchedulableNodes` 优先级更高，不能因为 Top N 导致可调度节点少于该值。
 
 ## 5. 方式一：独立 kube-scheduler
 
@@ -91,9 +79,12 @@ args:
           +-------------> Kubernetes API Server
 ```
 
-部署命令：
+部署命令（CRD 必须先于使用它的 manager 安装）：
 
 ```bash
+kubectl apply -f config/crd/bases/scheduler.example.com_schedulerpolicies.yaml
+kubectl wait --for=condition=Established --timeout=60s crd/schedulerpolicies.scheduler.example.com
+kubectl apply -f config/samples/scheduler_v1alpha1_schedulerpolicy.yaml
 kubectl apply -f deploy/manifest.yaml
 kubectl -n kube-system rollout status deployment/i-scheduler-extender
 kubectl -n kube-system get pod -l component=i-scheduler-extender -o wide
@@ -153,22 +144,25 @@ kubectl describe pod scheduler-extender-test
 kubectl -n kube-system logs deployment/i-scheduler-extender -c i-scheduler-extender --tail=100
 ```
 
-### 5.3 修改参数
+### 5.3 修改策略
 
-修改 `deploy/manifest.yaml` 中 Extender 容器的 `args`，然后重新应用：
+修改并应用 `SchedulerPolicy/cluster`，controller 会自动加载新策略：
 
 ```bash
-kubectl apply -f deploy/manifest.yaml
-kubectl -n kube-system rollout status deployment/i-scheduler-extender
+kubectl edit schedulerpolicy cluster
+kubectl get schedulerpolicy cluster -o yaml
 ```
 
-参数修改会触发 Deployment 滚动更新，新的 Pod 启动后生效。不需要修改控制面节点上的 `/etc/kubernetes/manifests/kube-scheduler.yaml`。
+只有进程监听或 manager 启动选项变更时才需要修改 [scheduler.yaml](../config/manager/scheduler.yaml) 并重启 manager。组合清单使用相同的 CRD 和 `SchedulerPolicy/cluster` API；不需要修改控制面节点上的 `/etc/kubernetes/manifests/kube-scheduler.yaml`。
 
 ## 6. 方式二：集成已有 kube-scheduler
 
-这种方式只部署 Extender，已有 kube-scheduler 通过 Service 调用它。部署 Extender：
+这种方式只部署 Extender，已有 kube-scheduler 通过 Service 调用它。先确保 CRD 和策略对象已安装，再部署 Extender：
 
 ```bash
+kubectl apply -f config/crd/bases/scheduler.example.com_schedulerpolicies.yaml
+kubectl wait --for=condition=Established --timeout=60s crd/schedulerpolicies.scheduler.example.com
+kubectl apply -f config/samples/scheduler_v1alpha1_schedulerpolicy.yaml
 kubectl apply -f deploy/manifest-integrated.yaml
 kubectl -n kube-system rollout status deployment/i-scheduler-extender
 kubectl -n kube-system get svc i-scheduler-extender
@@ -203,10 +197,12 @@ extenders:
 core/nodes            get, list, patch
 core/pods             get, list
 core/pods/binding     create
+scheduler.example.com/schedulerpolicies get, list, watch, update, patch
+scheduler.example.com/schedulerpolicies/status get, update, patch
 metrics.k8s.io/nodes  get, list
 ```
 
-`manifest.yaml` 为了示例快速运行使用了 `cluster-admin`，生产环境应拆分 ServiceAccount 并收紧权限。`manifest-integrated.yaml` 的 ClusterRole 按当前代码授予上述权限：读取 Metrics API、统计 Pod 内存预算、维护 Node 内存保护标签，以及执行 Bind。
+先安装 CRD 并创建 `SchedulerPolicy/cluster`，再启动任一 manager 部署方式。`manifest.yaml` 为了示例快速运行使用了 `cluster-admin`，生产环境应拆分 ServiceAccount 并收紧权限。`manifest-integrated.yaml` 的 ClusterRole 按当前代码授予上述权限：读取 Metrics API、统计 Pod 内存预算、维护 Node 内存保护标签，以及执行 Bind。
 
 ## 7. ACK 托管集群
 
@@ -241,8 +237,8 @@ ACK 部署注意事项：
     -> CPU 10% + 内存 90% 计算综合使用率
     -> 按综合使用率降序排序
     -> 取 Top N
-    -> 超过 high-threshold 的节点执行 cordon
-    -> 至少保留 min-schedulable-nodes 个可调度节点
+    -> 超过 highThreshold 的节点执行 cordon
+    -> 至少保留 minSchedulableNodes 个可调度节点
 ```
 
 程序只修改：
@@ -293,7 +289,7 @@ kubectl delete -f deploy/manifest-integrated.yaml
 ## 10. 上线前检查
 
 - `kubectl top nodes` 正常；
-- `top-nodes-count`、`min-schedulable-nodes` 与节点总数匹配；
+- `topNodesCount`、`minSchedulableNodes` 与节点总数匹配；
 - 已设置节点白名单，避免节点保护逻辑处理控制平面或特殊用途节点；
 - Extender ServiceAccount 可以读取 Metrics API；
 - 工作负载设置了内存 request 或 limit；

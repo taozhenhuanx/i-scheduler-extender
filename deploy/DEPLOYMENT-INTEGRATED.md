@@ -1,6 +1,6 @@
 # 说明
 
-最终部署方案请优先阅读 [DEPLOYMENT-STARTUP.md](DEPLOYMENT-STARTUP.md)。本文保留为“复用已有 kube-scheduler”的补充说明；当前节点保护参数统一通过启动参数配置，不读取 NodeBalancer CRD。
+最终部署方案请优先阅读 [DEPLOYMENT-STARTUP.md](DEPLOYMENT-STARTUP.md)。本文保留为“复用已有 kube-scheduler”的补充说明；节点保护策略由集群级 `SchedulerPolicy/cluster` 自定义资源管理，挂载的 YAML 只保存 manager 进程参数。
 
 # i-scheduler-extender 集成到现有 kube-scheduler
 
@@ -48,6 +48,18 @@ metadata:
   name: i-scheduler-extender
   namespace: kube-system
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: i-scheduler-extender-config
+  namespace: kube-system
+data:
+  config.yaml: |
+    metricsBindAddress: "0"
+    healthProbeBindAddress: ":8082"
+    extenderBindAddress: ":8080"
+    leaderElection: true
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -55,7 +67,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "patch"]
+    verbs: ["get", "list", "watch", "patch", "update"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
@@ -65,6 +77,9 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["nodes"]
     verbs: ["get", "list"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -120,28 +135,46 @@ spec:
         - name: i-scheduler-extender
           image: lixd96/i-scheduler-extender:v1
           imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/i-scheduler-extender/config.yaml
           ports:
             - name: http
               containerPort: 8080
+            - name: health
+              containerPort: 8082
+          volumeMounts:
+            - name: operator-config
+              mountPath: /etc/i-scheduler-extender/config.yaml
+              subPath: config.yaml
+              readOnly: true
           readinessProbe:
-            tcpSocket:
-              port: http
+            httpGet:
+              path: /readyz
+              port: health
             initialDelaySeconds: 3
           livenessProbe:
-            tcpSocket:
-              port: http
+            httpGet:
+              path: /healthz
+              port: health
             initialDelaySeconds: 10
+      volumes:
+        - name: operator-config
+          configMap:
+            name: i-scheduler-extender-config
 ```
 
-部署并检查：
+先安装 CRD、创建集群策略，再部署 manager：
 
 ```bash
+kubectl apply -f config/crd/bases/scheduler.example.com_schedulerpolicies.yaml
+kubectl wait --for=condition=Established --timeout=60s crd/schedulerpolicies.scheduler.example.com
+kubectl apply -f config/samples/scheduler_v1alpha1_schedulerpolicy.yaml
 kubectl apply -f deploy/manifest-integrated.yaml
 kubectl -n kube-system rollout status deploy/i-scheduler-extender
 kubectl -n kube-system get pod,svc i-scheduler-extender
 ```
 
-这里的 ClusterRole 是 Extender 当前行为所需的集群级最小权限：读取、列出和更新 Node 标签，列出 Pod 以统计已分配内存预算，跨命名空间创建 `pods/binding`，并读取 `metrics.k8s.io/nodes`。不再使用 `cluster-admin`。
+ClusterRole 包含 controller 和 Extender 当前所需权限：监听、读取和更新 Node，监听 `schedulerpolicies.scheduler.example.com` 并更新其 status，列出 Pod 统计已分配内存预算，跨命名空间创建 `pods/binding`，读取 `metrics.k8s.io/nodes`，并使用 Lease 进行 controller leader election。策略修改通过 `kubectl edit schedulerpolicy cluster` 完成；controller 会自动协调新设置。实际生产权限仍应按集群策略审核。
 
 ## 4. 修改现有 kube-scheduler 配置
 

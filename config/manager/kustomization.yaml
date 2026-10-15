@@ -1,0 +1,9 @@
+resources:
+- manager.yaml
+- extender_service.yaml
+configMapGenerator:
+- name: scheduler-settings
+  files:
+  - config.yaml=scheduler.yaml
+generatorOptions:
+  disableNameSuffixHash: true

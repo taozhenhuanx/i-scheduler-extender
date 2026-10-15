@@ -7,6 +7,7 @@ package rebalancer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -75,7 +76,7 @@ func New(client kubernetes.Interface, dynamicClient dynamic.Interface, config Co
 
 func (b *Balancer) Run(ctx context.Context) {
 	for {
-		b.reconcile(ctx)
+		_ = b.Reconcile(ctx)
 		timer := time.NewTimer(b.config.CheckInterval)
 		select {
 		case <-ctx.Done():
@@ -86,18 +87,19 @@ func (b *Balancer) Run(ctx context.Context) {
 	}
 }
 
-func (b *Balancer) reconcile(ctx context.Context) {
+// Reconcile performs one cluster-wide node balancing pass.
+func (b *Balancer) Reconcile(ctx context.Context) error {
 	config := b.config
 
 	nodes, err := b.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		log.Printf("[node-balancer] list nodes failed: %v", err)
-		return
+		return err
 	}
 	metrics, err := b.dynamicClient.Resource(nodeusage.NodeMetricsGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		log.Printf("[node-balancer] list node metrics failed: %v", err)
-		return
+		return err
 	}
 
 	metricsByNode := make(map[string]unstructured.Unstructured, len(metrics.Items))
@@ -176,6 +178,7 @@ func (b *Balancer) reconcile(ctx context.Context) {
 	}
 	log.Printf("[node-balancer] checked nodes=%d metrics=%d schedulable=%d high=%d",
 		len(managedNodes), len(usageList), schedulableCount, len(highNodes))
+	return nil
 }
 
 func validateConfig(config Config) error {
@@ -246,8 +249,31 @@ func hasAutoCordonAnnotation(node corev1.Node) bool {
 }
 
 func (b *Balancer) setUnschedulable(ctx context.Context, node corev1.Node, value bool) error {
+	return setUnschedulable(ctx, b.client, node, value)
+}
+
+// UncordonAutoCordonedNodes restores nodes this controller cordoned before the
+// SchedulerPolicy that owned the protection is deleted.
+func UncordonAutoCordonedNodes(ctx context.Context, client kubernetes.Interface) error {
+	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list nodes for policy cleanup: %w", err)
+	}
+	var cleanupErrors []error
+	for _, node := range nodes.Items {
+		if !node.Spec.Unschedulable || !hasAutoCordonAnnotation(node) {
+			continue
+		}
+		if err := setUnschedulable(ctx, client, node, false); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("uncordon %q: %w", node.Name, err))
+		}
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func setUnschedulable(ctx context.Context, client kubernetes.Interface, node corev1.Node, value bool) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		current, err := b.client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+		current, err := client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
@@ -266,7 +292,7 @@ func (b *Balancer) setUnschedulable(ctx context.Context, node corev1.Node, value
 		if err != nil {
 			return err
 		}
-		_, err = b.client.CoreV1().Nodes().Patch(ctx, node.Name, types.MergePatchType, payload, metav1.PatchOptions{})
+		_, err = client.CoreV1().Nodes().Patch(ctx, node.Name, types.MergePatchType, payload, metav1.PatchOptions{})
 		return err
 	})
 }

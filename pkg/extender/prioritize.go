@@ -32,13 +32,14 @@ func (ex *Extender) PrioritizeWithContext(ctx context.Context, args extenderv1.E
 	}
 
 	usagePercentages := make([]float64, len(args.Nodes.Items))
+	cpuWeight, memoryWeight := ex.scoringWeights()
 	for i, node := range args.Nodes.Items {
 		metric, ok := metricsByNode[node.Name]
 		if !ok {
 			klog.V(4).Infof("[Prioritize] metrics missing for node %q; returning neutral scores", node.Name)
 			return &result
 		}
-		usage, err := nodeusage.WeightedUsagePercentage(node, metric, ex.cpuWeight, ex.memoryWeight)
+		usage, err := nodeusage.WeightedUsagePercentage(node, metric, cpuWeight, memoryWeight)
 		if err != nil {
 			klog.V(4).Infof("[Prioritize] calculate usage for node %q failed; returning neutral scores: %v", node.Name, err)
 			return &result

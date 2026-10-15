@@ -1,0 +1,6 @@
+# Process settings loaded when the operator starts. Cluster policy is managed
+# through the SchedulerPolicy custom resource.
+metricsBindAddress: "0"
+healthProbeBindAddress: ":8082"
+extenderBindAddress: ":8080"
+leaderElection: true

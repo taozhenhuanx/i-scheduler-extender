@@ -1,0 +1,195 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: schedulerpolicies.scheduler.example.com
+spec:
+  group: scheduler.example.com
+  names:
+    kind: SchedulerPolicy
+    listKind: SchedulerPolicyList
+    plural: schedulerpolicies
+    shortNames:
+    - spol
+    singular: schedulerpolicy
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SchedulerPolicy configures cluster-wide scheduler scoring and node load protection.
+          Only the cluster-scoped object named "cluster" is reconciled.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SchedulerPolicySpec describes the policy used for scheduler
+              scoring and node protection.
+            properties:
+              checkIntervalSeconds:
+                default: 5
+                description: CheckIntervalSeconds is the interval between cluster-wide
+                  balancing passes.
+                format: int32
+                minimum: 1
+                type: integer
+              cpuWeight:
+                default: 10
+                description: CPUWeight is the percentage of the scoring weight assigned
+                  to CPU utilization.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
+              highThreshold:
+                default: 70
+                description: HighThreshold is the weighted utilization percentage
+                  at which a node can be cordoned.
+                format: int32
+                maximum: 100
+                minimum: 5
+                type: integer
+              ignoreNodes:
+                description: IgnoreNodes lists node names excluded from policy evaluation.
+                items:
+                  type: string
+                type: array
+              memoryWeight:
+                default: 90
+                description: MemoryWeight is the percentage of the scoring weight
+                  assigned to memory utilization.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
+              minSchedulableNodes:
+                default: 4
+                description: MinSchedulableNodes is the minimum number of eligible
+                  nodes kept schedulable.
+                format: int32
+                minimum: 1
+                type: integer
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: |-
+                  NodeSelector limits policy evaluation to nodes with all listed labels.
+                  An empty selector matches every node.
+                type: object
+              recoveryThreshold:
+                description: |-
+                  RecoveryThreshold is the utilization percentage below which an automatically cordoned
+                  node can be uncordoned. When omitted, it defaults to highThreshold minus 5.
+                format: int32
+                minimum: 0
+                type: integer
+              topNodesCount:
+                default: 9
+                description: TopNodesCount limits cordon decisions to the most heavily
+                  utilized eligible nodes.
+                format: int32
+                minimum: 1
+                type: integer
+            type: object
+          status:
+            description: SchedulerPolicyStatus reports whether the latest policy was
+              applied successfully.
+            properties:
+              conditions:
+                description: Conditions describes the state of the policy.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the most recent spec generation
+                  processed by the controller.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
