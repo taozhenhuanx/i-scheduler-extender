@@ -47,6 +47,7 @@ type Extender struct {
 }
 
 // SetWeights updates the CPU and memory scoring weights applied to new requests.
+// SetWeights 在线更新 CPU 与内存评分权重；并发评分通过读写锁读取一致的权重。
 func (ex *Extender) SetWeights(cpuWeight, memoryWeight float64) error {
 	cpuWeight, memoryWeight, err := nodeusage.ParseWeights(
 		strconv.FormatFloat(cpuWeight, 'f', -1, 64),
@@ -91,6 +92,7 @@ func NewExtenderWithWeights(cpuWeight, memoryWeight float64) *Extender {
 }
 
 // NewExtenderWithClients builds an extender with clients owned by the operator manager.
+// NewExtenderWithClients 复用 manager 已创建的客户端，避免 Extender 再单独加载 kubeconfig。
 func NewExtenderWithClients(clientset kubernetes.Interface, dynamicClient dynamic.Interface, cpuWeight, memoryWeight float64) *Extender {
 	return &Extender{
 		ClientSet:     clientset,

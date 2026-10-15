@@ -51,6 +51,7 @@ type nodeUsage struct {
 	percentage float64
 }
 
+// New 校验客户端、权重和阈值，并为后续协调构造 Balancer。
 func New(client kubernetes.Interface, dynamicClient dynamic.Interface, config Config) (*Balancer, error) {
 	if client == nil || dynamicClient == nil {
 		return nil, fmt.Errorf("kubernetes and dynamic clients are required")
@@ -74,6 +75,7 @@ func New(client kubernetes.Interface, dynamicClient dynamic.Interface, config Co
 	}, nil
 }
 
+// Run 按策略间隔重复协调；收到 manager 的取消信号后退出。
 func (b *Balancer) Run(ctx context.Context) {
 	for {
 		_ = b.Reconcile(ctx)
@@ -87,7 +89,7 @@ func (b *Balancer) Run(ctx context.Context) {
 	}
 }
 
-// Reconcile performs one cluster-wide node balancing pass.
+// Reconcile 执行一轮节点负载保护：筛选受管节点、计算负载，并按阈值恢复或 cordon 节点。
 func (b *Balancer) Reconcile(ctx context.Context) error {
 	config := b.config
 
@@ -108,6 +110,7 @@ func (b *Balancer) Reconcile(ctx context.Context) error {
 	}
 	managedNodes := make([]corev1.Node, 0, len(nodes.Items))
 	usageList := make([]nodeUsage, 0, len(nodes.Items))
+	// 先应用忽略名单和标签选择器，再为符合条件且有指标的节点计算加权负载。
 	for _, node := range nodes.Items {
 		if _, ignored := config.IgnoreNodes[node.Name]; ignored {
 			continue
@@ -145,6 +148,7 @@ func (b *Balancer) Reconcile(ctx context.Context) error {
 		}
 	}
 
+	// 先恢复负载已低于恢复阈值的本控制器管理节点，再检查是否需要 cordon 新节点。
 	schedulableCount := 0
 	for _, node := range managedNodes {
 		if !node.Spec.Unschedulable {
@@ -162,6 +166,7 @@ func (b *Balancer) Reconcile(ctx context.Context) error {
 			log.Printf("[node-balancer] uncordon %q, weighted usage=%.2f%%", item.node.Name, item.percentage)
 		}
 	}
+	// cordon 前再次检查最小可调度节点数，避免保护负载时耗尽集群可用节点。
 	for _, item := range usageList {
 		if !highNodes[item.node.Name] || item.node.Spec.Unschedulable {
 			continue
@@ -254,6 +259,7 @@ func (b *Balancer) setUnschedulable(ctx context.Context, node corev1.Node, value
 
 // UncordonAutoCordonedNodes restores nodes this controller cordoned before the
 // SchedulerPolicy that owned the protection is deleted.
+// 删除策略时只恢复带有本控制器标记的节点，避免改动管理员手动 cordon 的节点。
 func UncordonAutoCordonedNodes(ctx context.Context, client kubernetes.Interface) error {
 	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -271,6 +277,7 @@ func UncordonAutoCordonedNodes(ctx context.Context, client kubernetes.Interface)
 	return errors.Join(cleanupErrors...)
 }
 
+// setUnschedulable 通过带 resourceVersion 的合并补丁更新节点，并在并发冲突时重试。
 func setUnschedulable(ctx context.Context, client kubernetes.Interface, node corev1.Node, value bool) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current, err := client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})

@@ -39,6 +39,7 @@ const (
 // +kubebuilder:rbac:groups=metrics.k8s.io,resources=nodes,verbs=get;list
 
 // SchedulerPolicyReconciler applies the cluster-wide SchedulerPolicy named "cluster".
+// SchedulerPolicyReconciler 负责把单例策略协调到节点负载保护和 Extender 评分权重。
 type SchedulerPolicyReconciler struct {
 	client.Client
 	KubernetesClient kubernetes.Interface
@@ -46,6 +47,7 @@ type SchedulerPolicyReconciler struct {
 	Extender         *extender.Extender
 }
 
+// Reconcile 校验单例资源，处理删除清理，应用策略后更新 Ready 状态并安排下一轮检查。
 func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request reconcile.Request) (ctrl.Result, error) {
 	if request.Name != clusterPolicyName {
 		unsupportedPolicy := &schedulerv1alpha1.SchedulerPolicy{}
@@ -67,6 +69,7 @@ func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request recon
 	}
 	if !policy.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(policy, cleanupFinalizer) {
+			// 删除策略时恢复本控制器 cordon 的节点，并将 Extender 权重重置为默认值。
 			if err := rebalancer.UncordonAutoCordonedNodes(ctx, r.KubernetesClient); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -84,6 +87,7 @@ func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request recon
 		return ctrl.Result{}, nil
 	}
 	if !controllerutil.ContainsFinalizer(policy, cleanupFinalizer) {
+		// 先登记 finalizer，确保资源删除时有机会执行节点恢复和权重清理。
 		controllerutil.AddFinalizer(policy, cleanupFinalizer)
 		if err := r.Update(ctx, policy); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add policy cleanup finalizer: %w", err)
@@ -91,12 +95,14 @@ func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request recon
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// CRD 字段可单独校验的范围由 schema 约束；权重总和等跨字段规则在这里校验。
 	config, cpuWeight, memoryWeight, err := balancerConfig(policy.Spec)
 	var balancer *rebalancer.Balancer
 	if err == nil {
 		balancer, err = rebalancer.New(r.KubernetesClient, r.DynamicClient, config)
 	}
 	if err == nil {
+		// 评分和负载保护共用 CR 中的权重，随后执行一轮节点协调。
 		err = r.Extender.SetWeights(cpuWeight, memoryWeight)
 	}
 	if err == nil {
@@ -115,6 +121,7 @@ func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request recon
 	return ctrl.Result{RequeueAfter: config.CheckInterval}, nil
 }
 
+// setReadyCondition 只在状态变化时写回 status，避免重复更新产生无意义事件。
 func (r *SchedulerPolicyReconciler) setReadyCondition(
 	ctx context.Context,
 	policy *schedulerv1alpha1.SchedulerPolicy,
@@ -138,6 +145,7 @@ func (r *SchedulerPolicyReconciler) setReadyCondition(
 	return r.Status().Update(ctx, updated)
 }
 
+// balancerConfig 将 CR 字段转换成运行时配置，并校验需要联合判断的策略约束。
 func balancerConfig(spec schedulerv1alpha1.SchedulerPolicySpec) (rebalancer.Config, float64, float64, error) {
 	if spec.CPUWeight+spec.MemoryWeight != 100 {
 		return rebalancer.Config{}, 0, 0, fmt.Errorf("cpuWeight and memoryWeight must sum to 100")
@@ -169,6 +177,7 @@ func balancerConfig(spec schedulerv1alpha1.SchedulerPolicySpec) (rebalancer.Conf
 	}, float64(spec.CPUWeight) / 100, float64(spec.MemoryWeight) / 100, nil
 }
 
+// SetupWithManager 监听策略和 Node 变化；节点变化时重新排队协调集群级单例策略。
 func (r *SchedulerPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	toClusterRequest := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: clusterRequestName}}}

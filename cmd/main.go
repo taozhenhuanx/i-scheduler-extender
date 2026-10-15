@@ -41,6 +41,7 @@ func init() {
 func main() {
 	var configFile string
 
+	// 监听地址和 leader election 从启动配置读取；调度策略由 SchedulerPolicy CR 管理。
 	flag.StringVar(&configFile, "config", "/etc/i-scheduler-extender/config.yaml", "path to the operator YAML configuration")
 	flag.Parse()
 
@@ -52,6 +53,7 @@ func main() {
 	}
 }
 
+// run 创建 Kubernetes 客户端和 controller-runtime manager，并注册策略控制器与 Extender 服务。
 func run(configFile string) error {
 	appSettings, err := settings.Load(configFile)
 	if err != nil {
@@ -71,6 +73,7 @@ func run(configFile string) error {
 		return fmt.Errorf("create dynamic Kubernetes client: %w", err)
 	}
 
+	// CR 首次协调前使用默认权重，之后由 SchedulerPolicy 更新 Extender 权重。
 	operatorExtender := extender.NewExtenderWithClients(
 		clientset,
 		dynamicClient,
@@ -115,6 +118,7 @@ func run(configFile string) error {
 	return mgr.Start(ctrl.SetupSignalHandler())
 }
 
+// serveExtender 在 manager 生命周期内提供调度扩展接口，并在收到退出信号时优雅关闭。
 func serveExtender(ctx context.Context, address string, handler http.Handler) error {
 	httpServer := &http.Server{
 		Addr:              address,

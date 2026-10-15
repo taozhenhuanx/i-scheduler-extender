@@ -10,6 +10,7 @@ import (
 
 // Settings contains manager and HTTP server options that are independent of the
 // cluster policy managed through SchedulerPolicy resources.
+// Settings 保存进程级选项；集群调度策略应通过 SchedulerPolicy 资源配置。
 type Settings struct {
 	MetricsBindAddress     string `json:"metricsBindAddress"`
 	HealthProbeBindAddress string `json:"healthProbeBindAddress"`
@@ -17,6 +18,7 @@ type Settings struct {
 	LeaderElection         bool   `json:"leaderElection"`
 }
 
+// Default 返回监听地址和 leader election 的安全默认值。
 func Default() Settings {
 	return Settings{
 		MetricsBindAddress:     "0",
@@ -26,7 +28,7 @@ func Default() Settings {
 	}
 }
 
-// Load reads settings from path, retaining defaults for omitted values and rejecting unknown keys.
+// Load 读取 YAML 配置，缺省字段沿用默认值，并拒绝未知字段以便尽早发现配置拼写错误。
 func Load(path string) (Settings, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

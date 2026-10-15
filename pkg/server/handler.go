@@ -39,10 +39,10 @@ func (h *Handler) Filter(w http.ResponseWriter, r *http.Request) {
 	var args extenderv1.ExtenderArgs
 	var result *extenderv1.ExtenderFilterResult
 
-	// 传进来的Body Decode给args
+	// 将 kube-scheduler 发送的 JSON 请求解析为 Extender 参数。
 	err := json.NewDecoder(r.Body).Decode(&args)
 	if err != nil {
-		// 返回结果？
+		// 按 Scheduler Extender 协议把解析错误写入响应体。
 		result = &extenderv1.ExtenderFilterResult{
 			Error: err.Error(),
 		}
