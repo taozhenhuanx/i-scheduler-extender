@@ -29,6 +29,8 @@ spec:
         description: |-
           SchedulerPolicy configures cluster-wide scheduler scoring and node load protection.
           Only the cluster-scoped object named "cluster" is reconciled.
+          SchedulerPolicy 是集群级调度策略资源，用于配置节点打分和负载保护。
+          控制器只协调名称为 "cluster" 的单例对象。
         properties:
           apiVersion:
             description: |-
@@ -48,49 +50,57 @@ spec:
           metadata:
             type: object
           spec:
-            description: SchedulerPolicySpec describes the policy used for scheduler
-              scoring and node protection.
+            description: |-
+              SchedulerPolicySpec describes the policy used for scheduler scoring and node protection.
+              SchedulerPolicySpec 定义调度评分与节点负载保护所使用的策略参数。
             properties:
               checkIntervalSeconds:
                 default: 5
-                description: CheckIntervalSeconds is the interval between cluster-wide
-                  balancing passes.
+                description: |-
+                  CheckIntervalSeconds is the interval between cluster-wide balancing passes.
+                  CheckIntervalSeconds 指定控制器检查节点负载的周期，单位为秒。
                 format: int32
                 minimum: 1
                 type: integer
               cpuWeight:
                 default: 10
-                description: CPUWeight is the percentage of the scoring weight assigned
-                  to CPU utilization.
+                description: |-
+                  CPUWeight is the percentage of the scoring weight assigned to CPU utilization.
+                  CPUWeight 是评分中分配给 CPU 使用率的权重百分比，须与 MemoryWeight 之和为 100。
                 format: int32
                 maximum: 100
                 minimum: 0
                 type: integer
               highThreshold:
                 default: 70
-                description: HighThreshold is the weighted utilization percentage
-                  at which a node can be cordoned.
+                description: |-
+                  HighThreshold is the weighted utilization percentage at which a node can be cordoned.
+                  HighThreshold 是节点允许被 cordon（标记为不可调度）的加权负载阈值。
                 format: int32
                 maximum: 100
                 minimum: 5
                 type: integer
               ignoreNodes:
-                description: IgnoreNodes lists node names excluded from policy evaluation.
+                description: |-
+                  IgnoreNodes lists node names excluded from policy evaluation.
+                  IgnoreNodes 按节点名称排除节点；被列出的节点不受本策略管理。
                 items:
                   type: string
                 type: array
               memoryWeight:
                 default: 90
-                description: MemoryWeight is the percentage of the scoring weight
-                  assigned to memory utilization.
+                description: |-
+                  MemoryWeight is the percentage of the scoring weight assigned to memory utilization.
+                  MemoryWeight 是评分中分配给内存使用率的权重百分比，须与 CPUWeight 之和为 100。
                 format: int32
                 maximum: 100
                 minimum: 0
                 type: integer
               minSchedulableNodes:
                 default: 4
-                description: MinSchedulableNodes is the minimum number of eligible
-                  nodes kept schedulable.
+                description: |-
+                  MinSchedulableNodes is the minimum number of eligible nodes kept schedulable.
+                  MinSchedulableNodes 指定策略选中的节点中至少保留多少个可调度节点。
                 format: int32
                 minimum: 1
                 type: integer
@@ -100,28 +110,34 @@ spec:
                 description: |-
                   NodeSelector limits policy evaluation to nodes with all listed labels.
                   An empty selector matches every node.
+                  NodeSelector 将策略限定到同时匹配所列标签的节点；空选择器匹配所有节点。
                 type: object
               recoveryThreshold:
                 description: |-
                   RecoveryThreshold is the utilization percentage below which an automatically cordoned
                   node can be uncordoned. When omitted, it defaults to highThreshold minus 5.
+                  RecoveryThreshold 是自动 cordon 的节点允许恢复调度的负载阈值；未设置时默认为 HighThreshold 减 5。
                 format: int32
                 minimum: 0
                 type: integer
               topNodesCount:
                 default: 9
-                description: TopNodesCount limits cordon decisions to the most heavily
-                  utilized eligible nodes.
+                description: |-
+                  TopNodesCount limits cordon decisions to the most heavily utilized eligible nodes.
+                  TopNodesCount 限制每轮参与 cordon 判断的节点数量，只考虑负载最高的前 N 个节点。
                 format: int32
                 minimum: 1
                 type: integer
             type: object
           status:
-            description: SchedulerPolicyStatus reports whether the latest policy was
-              applied successfully.
+            description: |-
+              SchedulerPolicyStatus reports whether the latest policy was applied successfully.
+              SchedulerPolicyStatus 记录控制器最近一次协调的结果。
             properties:
               conditions:
-                description: Conditions describes the state of the policy.
+                description: |-
+                  Conditions describes the state of the policy.
+                  Conditions 描述策略当前是否已成功应用以及失败原因。
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -181,8 +197,9 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               observedGeneration:
-                description: ObservedGeneration is the most recent spec generation
-                  processed by the controller.
+                description: |-
+                  ObservedGeneration is the most recent spec generation processed by the controller.
+                  ObservedGeneration 表示控制器最近处理过的 spec 版本号。
                 format: int64
                 type: integer
             type: object
