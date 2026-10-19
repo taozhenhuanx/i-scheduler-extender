@@ -47,4 +47,4 @@ spec:
 
 进程启动配置仍位于 [`../config/manager/scheduler.yaml`](../config/manager/scheduler.yaml)，但只包含 metrics、健康检查、Extender 监听地址和 leader election 设置。修改这些 manager 进程参数后才需要滚动重启 Deployment。
 
-调度评分复用 `cpuWeight` 和 `memoryWeight`，并将加权使用率映射到 0–10 分。Filter 另有内存准入保护：按 Metrics API 实测内存和已分配 Pod 的内存预算估算，加上新 Pod 的内存 request/limit；超过 Allocatable 的 80% 时设置 `scheduler.example.com/memory-blocked=true` 并排除节点，估算降到 75% 后清除该标签。Pod 必须声明正数的内存 request 或 limit。
+调度评分复用 `cpuWeight` 和 `memoryWeight`，并将加权使用率映射到 0–10 分。Filter 另有内存准入保护：以 Metrics API 实测内存为基线，加入正在 Bind 的临时预约和新 Pod 预算；新 Pod 的预算优先使用 request，没有正数 request 时使用 limit。超过 Allocatable 的 80% 时设置 `scheduler.example.com/memory-blocked=true` 并排除节点，估算降到 75% 后清除该标签。Pod 必须声明正数的内存 request 或 limit。

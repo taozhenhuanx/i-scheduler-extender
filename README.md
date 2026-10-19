@@ -10,7 +10,7 @@
 - 分数为 `10 * (1 - 加权使用率 / 100)`，四舍五入并限制在 0–10；负载越低，分数越高。
 - `SchedulerPolicy/cluster` 中的 `cpuWeight` 和 `memoryWeight` 同时控制调度打分和节点负载保护。默认 CPU 权重 10%，内存权重 90%。
 - Metrics API 结果缓存 5 秒。内存保护所需的指标或 Pod 列表不可用时，Filter 会停止本轮调度以免在未知容量下放行 Pod；动态评分失败时则返回中性分 0。
-- Pod 必须声明正数的内存 request 或 limit；计算时使用 request 和 limit 中较大的值。已调度 Pod 的这些预算与当前实测内存取较大值，再加上待调度 Pod 的预算进行判断。
+- 内存保护以 Metrics API 的节点实测内存为基线，并加入正在 Bind 的临时预约，避免并发准入漏算。新 Pod 必须声明正数的内存 request 或 limit；预算优先使用 request，没有正数 request 时回退到 limit，因此 request 小于 limit 时保留超卖空间。
 
 80% 是调度准入的预测门槛，不是节点物理内存的绝对上限。Metrics API 有采样延迟，Pod 可能超过 request（尤其未设置 limit 时），不经过此 Extender 的其他调度路径也不受它拦截。`memory-blocked` 标签供识别和观测；实际拒绝由 Extender 的 Filter/Bind 执行。
 
@@ -42,6 +42,8 @@ make deploy IMG=registry.example.com/platform/i-scheduler-extender:v1
 `make deploy` 部署 Kubebuilder manager 和 Extender Service。使用自定义 `kube-scheduler` 的组合部署仍可用 [deploy/manifest.yaml](deploy/manifest.yaml)。部署细节见 [部署文档](deploy/DEPLOYMENT-STARTUP.md) 和 [集成部署文档](deploy/DEPLOYMENT-INTEGRATED.md)。
 
 Kubebuilder 部署的 Extender Service 地址为 `http://i-scheduler-extender-http.i-scheduler-extender-system.svc:8080`，可填入已有 kube-scheduler 的 extender `urlPrefix`。
+
+Eureka 可使用 Extender 的 `GET /health` 健康检查接口；服务返回 HTTP 200 和 `{"status":"UP"}`。例如：`http://i-scheduler-extender-http.i-scheduler-extender-system.svc:8080/health`。
 
 ## 验证调度
 

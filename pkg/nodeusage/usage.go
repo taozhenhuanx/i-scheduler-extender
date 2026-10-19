@@ -83,7 +83,7 @@ func MemoryAllocatableBytes(node corev1.Node) (int64, error) {
 	return allocatable.Value(), nil
 }
 
-// PodMemoryReservationBytes 取容器 request 与 limit 中较大的值，并计入 InitContainer 峰值及 Pod Overhead。
+// PodMemoryReservationBytes 优先按 request 统计调度预留；没有正数 request 时回退到 limit，并计入 InitContainer 峰值及 Pod Overhead。
 func PodMemoryReservationBytes(pod corev1.Pod) int64 {
 	appMemory := resource.Quantity{}
 	for _, container := range pod.Spec.Containers {
@@ -120,11 +120,10 @@ func PodMemoryReservationBytes(pod corev1.Pod) int64 {
 
 func containerMemoryReservation(container corev1.Container) resource.Quantity {
 	request := container.Resources.Requests[corev1.ResourceMemory]
-	limit := container.Resources.Limits[corev1.ResourceMemory]
-	if limit.Cmp(request) > 0 {
-		return limit.DeepCopy()
+	if request.Sign() > 0 {
+		return request.DeepCopy()
 	}
-	return request.DeepCopy()
+	return container.Resources.Limits[corev1.ResourceMemory].DeepCopy()
 }
 
 func metricQuantity(usage map[string]interface{}, name string) (resource.Quantity, error) {

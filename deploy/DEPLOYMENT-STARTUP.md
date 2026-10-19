@@ -2,7 +2,7 @@
 
 ## 1. 方案说明
 
-进程由 Kubebuilder/controller-runtime manager 管理。集群级 `SchedulerPolicy/cluster` 是调度策略的期望状态；controller 监听策略和 Node 变化，并按 CR 的 spec 协调节点负载保护和 Scheduler Extender 的打分权重。同一 manager 还托管 Scheduler Extender HTTP 接口。调度打分和节点保护通过 `metrics.k8s.io/v1beta1` 读取节点实际 CPU 和内存使用率。调度 Filter 会按已调度 Pod 的内存 request/limit 与新 Pod 的 request/limit 预估内存占用；超过节点 Allocatable 的 80% 时标记节点并拒绝新 Pod，降至 75% 后解除标记。
+进程由 Kubebuilder/controller-runtime manager 管理。集群级 `SchedulerPolicy/cluster` 是调度策略的期望状态；controller 监听策略和 Node 变化，并按 CR 的 spec 协调节点负载保护和 Scheduler Extender 的打分权重。同一 manager 还托管 Scheduler Extender HTTP 接口。调度打分和节点保护通过 `metrics.k8s.io/v1beta1` 读取节点实际 CPU 和内存使用率。调度 Filter 以节点实测内存为基线，加入正在 Bind 的临时预约和新 Pod 预算；新 Pod 优先使用正数 request，没有正数 request 时回退到 limit。超过节点 Allocatable 的 80% 时标记节点并拒绝新 Pod，降至 75% 后解除标记。
 
 80% 是调度预测门槛，不是物理内存绝对上限：Metrics API 存在采样延迟，Pod 可能超过 request，且未经过此 Extender 的调度路径不受拦截。实际拒绝由 Extender 的 Filter/Bind 执行。
 
@@ -114,7 +114,7 @@ Extender 根据实时加权使用率给内存安全的候选节点打 0–10 分
 kubectl top nodes
 ```
 
-无需给节点添加优先级标签。测试 Pod 必须声明正数的内存 request 或 limit；调度时按 request/limit 中较大的值计算。
+无需给节点添加优先级标签。测试 Pod 必须声明正数的内存 request 或 limit；调度预算优先按 request 计算，未设置正数 request 时使用 limit。
 
 测试 Pod：
 
@@ -172,7 +172,7 @@ kubectl -n kube-system get svc i-scheduler-extender
 
 ```yaml
 extenders:
-  - urlPrefix: "http://i-scheduler-extender.kube-system.svc.cluster.local:8080"
+  - urlPrefix: "http://i-scheduler-extender-http.i-scheduler-extender-system.svc.cluster.local:8080"
     enableHTTPS: false
     filterVerb: filter
     prioritizeVerb: prioritize
@@ -186,8 +186,10 @@ extenders:
 - `apiVersion` 必须使用目标 kube-scheduler 实际支持的版本；
 - 保留原有 leader election、认证、TLS 和 profiles 配置；
 - 已有 `profiles` 时只合并 `extenders`，不要重复添加 profile；
-- kube-scheduler 必须能访问 Extender Service DNS；
+- kube-scheduler 必须能访问 Extender Service DNS；Kubebuilder 部署的 Service 地址是 `i-scheduler-extender-http.i-scheduler-extender-system.svc.cluster.local:8080`；
 - 集成方式下业务 Pod 不需要设置 `schedulerName`。
+
+当前集群运行 Kubernetes 1.22.9，可使用 [`kube-scheduler-config-v1beta2.yaml`](kube-scheduler-config-v1beta2.yaml) 中的组件配置片段。将 `profiles` 和 `extenders` 合并到现有 `KubeSchedulerConfiguration`，不要覆盖控制平面原有的认证、leader election 等设置。kube-scheduler 为 hostNetwork Pod 时应使用 `dnsPolicy: ClusterFirstWithHostNet`，以便解析 Service DNS。
 
 ### 集成方式 RBAC
 

@@ -78,14 +78,12 @@ func (ex *Extender) BindWithContext(ctx context.Context, args extenderv1.Extende
 		result.Error = fmt.Sprintf("cannot read memory capacity for node %q: %v", args.Node, err)
 		return result
 	}
-	commitmentsByNode, err := ex.memoryCommitmentsByNode(ctx)
+	pendingByNode, err := ex.pendingMemoryByNode(ctx)
 	if err != nil {
-		result.Error = fmt.Sprintf("cannot read scheduled pod memory requests before binding: %v", err)
+		result.Error = fmt.Sprintf("cannot read pending memory reservations before binding: %v", err)
 		return result
 	}
-	if commitmentsByNode[args.Node] > memoryUsed {
-		memoryUsed = commitmentsByNode[args.Node]
-	}
+	memoryUsed += pendingByNode[args.Node]
 	currentPercent := memoryPercent(memoryUsed, memoryCapacity)
 	projectedPercent := memoryPercent(memoryUsed+podMemory, memoryCapacity)
 

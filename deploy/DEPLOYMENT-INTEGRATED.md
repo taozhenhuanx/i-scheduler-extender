@@ -199,7 +199,7 @@ kind: KubeSchedulerConfiguration
 profiles:
   - schedulerName: default-scheduler
 extenders:
-  - urlPrefix: "http://i-scheduler-extender.kube-system.svc.cluster.local:8080"
+  - urlPrefix: "http://i-scheduler-extender-http.i-scheduler-extender-system.svc.cluster.local:8080"
     enableHTTPS: false
     filterVerb: "filter"
     prioritizeVerb: "prioritize"
@@ -214,7 +214,7 @@ extenders:
 - 不要把 profile 名称写成 `i-scheduler-extender`，否则仍然需要业务 Pod 指定 `schedulerName`；
 - 不要把现有的 `leaderElect: true` 改成 `false`。原有 leader election 配置应保持不变；
 - 如果现有配置已有 `profiles`，只需确保默认 profile 的 `schedulerName` 是 `default-scheduler`，不要重复添加同名 profile；
-- kube-scheduler 必须能够访问 `i-scheduler-extender.kube-system.svc.cluster.local:8080`。如果控制平面网络不能访问 Service DNS，应改用控制平面可达的 extender 地址，并同步调整 `urlPrefix`。
+- kube-scheduler 必须能够访问 `i-scheduler-extender-http.i-scheduler-extender-system.svc.cluster.local:8080`。如果控制平面网络不能访问 Service DNS，应改用控制平面可达的 extender 地址，并同步调整 `urlPrefix`。
 
 ### 4.3 让 kube-scheduler 重新加载配置
 
@@ -270,9 +270,9 @@ kubectl get pod -o wide
 kubectl describe pod -l app=test
 ```
 
-调度打分按节点实时加权 CPU、内存使用率计算，不需要给节点添加优先级标签。Filter 会在预估调度后内存超过 80% 时标记并排除节点，内存 request/limit 预算降到 75% 后解除标签。Pod 必须声明正数的内存 request 或 limit。部署前确认 `kubectl top nodes` 正常，ServiceAccount 可以读取 `metrics.k8s.io/nodes` 和集群 Pod 列表。
+调度打分按节点实时加权 CPU、内存使用率计算，不需要给节点添加优先级标签。Filter 以节点实测内存为基线，加入正在 Bind 的临时预约和新 Pod 预算；新 Pod 优先使用正数 request，没有正数 request 时回退到 limit。预估调度后内存超过 80% 时标记并排除节点，实测内存降到 75% 后解除标签。Pod 必须声明正数的内存 request 或 limit。部署前确认 `kubectl top nodes` 正常，ServiceAccount 可以读取 `metrics.k8s.io/nodes` 和集群 Pod 列表。
 
-80% 是基于 Metrics API 和 Pod 内存预算的调度预测门槛，不是节点物理内存的绝对上限。指标有采样延迟，Pod 可能超过 request（特别是没有 limit 时），未经过此 Extender 的调度路径也不会被它拦截。`scheduler.example.com/memory-blocked=true` 标签用于识别和观测，实际调度拦截由 Extender 的 Filter/Bind 执行。
+80% 是基于 Metrics API 实测内存和新 Pod 预算的调度预测门槛，不是节点物理内存的绝对上限。request 小于 limit 时，新 Pod 的增量按 request 计算，因此保留超卖空间；没有正数 request 时使用 limit。指标有采样延迟，Pod 可能超过 request（特别是没有 limit 时），未经过此 Extender 的调度路径也不会被它拦截。`scheduler.example.com/memory-blocked=true` 标签用于识别和观测，实际调度拦截由 Extender 的 Filter/Bind 执行。
 
 内存预约保存在 Extender 进程内，因此请保持 `replicas: 1`。清单使用 `Recreate`，避免升级期间新旧实例同时接收调度请求。
 

@@ -43,9 +43,9 @@ func (ex *Extender) FilterWithContext(ctx context.Context, args extenderv1.Exten
 	if err != nil {
 		return &extenderv1.ExtenderFilterResult{Error: fmt.Sprintf("cannot read node memory metrics: %v", err)}
 	}
-	commitmentsByNode, err := ex.memoryCommitmentsByNode(ctx)
+	pendingByNode, err := ex.pendingMemoryByNode(ctx)
 	if err != nil {
-		return &extenderv1.ExtenderFilterResult{Error: fmt.Sprintf("cannot read scheduled pod memory requests: %v", err)}
+		return &extenderv1.ExtenderFilterResult{Error: fmt.Sprintf("cannot read Pod assignment snapshot: %v", err)}
 	}
 
 	nodes := make([]v1.Node, 0, len(args.Nodes.Items))
@@ -67,10 +67,7 @@ func (ex *Extender) FilterWithContext(ctx context.Context, args extenderv1.Exten
 			continue
 		}
 
-		committedMemory := commitmentsByNode[node.Name]
-		if committedMemory > memoryUsed {
-			memoryUsed = committedMemory
-		}
+		memoryUsed += pendingByNode[node.Name]
 		projectedMemory := memoryUsed + podMemory
 		currentPercent := memoryPercent(memoryUsed, memoryCapacity)
 		projectedPercent := memoryPercent(projectedMemory, memoryCapacity)

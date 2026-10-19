@@ -1,0 +1,18 @@
+# Kubernetes v1.22.x KubeSchedulerConfiguration for the default scheduler profile.
+# Merge this profile and extender into the existing kube-scheduler configuration.
+apiVersion: kubescheduler.config.k8s.io/v1beta2
+kind: KubeSchedulerConfiguration
+clientConnection:
+  kubeconfig: /etc/kubernetes/scheduler.conf
+leaderElection:
+  leaderElect: true
+profiles:
+  - schedulerName: default-scheduler
+extenders:
+  - urlPrefix: "http://i-scheduler-extender-http.i-scheduler-extender-system.svc.cluster.local:8080"
+    enableHTTPS: false
+    filterVerb: filter
+    prioritizeVerb: prioritize
+    bindVerb: bind
+    nodeCacheCapable: false
+    weight: 1

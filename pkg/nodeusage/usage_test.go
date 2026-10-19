@@ -18,6 +18,9 @@ func TestPodMemoryReservationBytesUsesContainerBudgetsAndInitPeak(t *testing.T) 
 				{Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
 				}},
+				{Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
+				}},
 			},
 			InitContainers: []corev1.Container{{Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
@@ -27,7 +30,7 @@ func TestPodMemoryReservationBytesUsesContainerBudgetsAndInitPeak(t *testing.T) 
 		},
 	}
 
-	wantQuantity := resource.MustParse("528Mi")
+	wantQuantity := resource.MustParse("436Mi")
 	want := wantQuantity.Value()
 	if got := PodMemoryReservationBytes(pod); got != want {
 		t.Fatalf("PodMemoryReservationBytes() = %d, want %d", got, want)

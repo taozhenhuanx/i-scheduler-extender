@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lixd96/i-scheduler-extender/pkg/nodeusage"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -46,8 +44,7 @@ func decideMemoryGuard(currentPercent, projectedPercent float64, isBlocked bool)
 }
 
 type podMemorySnapshot struct {
-	requestsByNode map[string]int64
-	nodeByPod      map[string]string
+	nodeByPod map[string]string
 }
 
 type pendingMemoryReservation struct {
@@ -56,16 +53,13 @@ type pendingMemoryReservation struct {
 	createdAt time.Time
 }
 
-// memoryCommitmentsByNode 合并已绑定 Pod 的内存预算和 Bind 中的临时预约，避免并发准入漏算。
-func (ex *Extender) memoryCommitmentsByNode(ctx context.Context) (map[string]int64, error) {
+// pendingMemoryByNode 汇总正在 Bind 的 Pod 临时预算；已运行 Pod 的占用以 Metrics API 实测值为准。
+func (ex *Extender) pendingMemoryByNode(ctx context.Context) (map[string]int64, error) {
 	snapshot, err := ex.podMemorySnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	commitments := make(map[string]int64, len(snapshot.requestsByNode))
-	for nodeName, bytes := range snapshot.requestsByNode {
-		commitments[nodeName] = bytes
-	}
+	pending := make(map[string]int64)
 
 	now := time.Now()
 	ex.pendingMemMu.Lock()
@@ -79,12 +73,12 @@ func (ex *Extender) memoryCommitmentsByNode(ctx context.Context) (map[string]int
 			delete(ex.pendingMemory, key)
 			continue
 		}
-		commitments[reservation.nodeName] += reservation.bytes
+		pending[reservation.nodeName] += reservation.bytes
 	}
-	return commitments, nil
+	return pending, nil
 }
 
-// podMemorySnapshot 汇总已分配到节点且未完成的 Pod 内存预算，并短暂缓存以减少 API 请求。
+// podMemorySnapshot 缓存 Pod 所属节点，用于确认 Bind 临时预留何时已被实测内存接替。
 func (ex *Extender) podMemorySnapshot(ctx context.Context) (*podMemorySnapshot, error) {
 	ex.podMemoryMu.Lock()
 	defer ex.podMemoryMu.Unlock()
@@ -99,19 +93,11 @@ func (ex *Extender) podMemorySnapshot(ctx context.Context) (*podMemorySnapshot, 
 		return nil, err
 	}
 	snapshot := &podMemorySnapshot{
-		requestsByNode: make(map[string]int64),
-		nodeByPod:      make(map[string]string, len(pods.Items)),
+		nodeByPod: make(map[string]string, len(pods.Items)),
 	}
 	for _, pod := range pods.Items {
 		key := podMemoryKey(pod.Namespace, pod.Name)
 		snapshot.nodeByPod[key] = pod.Spec.NodeName
-		if pod.Spec.NodeName == "" || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-			continue
-		}
-		request := nodeusage.PodMemoryReservationBytes(pod)
-		if request > 0 {
-			snapshot.requestsByNode[pod.Spec.NodeName] += request
-		}
 	}
 	ex.podMemory = snapshot
 	ex.podMemoryAt = time.Now()

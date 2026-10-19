@@ -25,7 +25,22 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/priority", h.Prioritize)
 	mux.HandleFunc("/prioritize", h.Prioritize)
 	mux.HandleFunc("/bind", h.Bind)
+	mux.HandleFunc("/health", h.Health)
 	return mux
+}
+
+// Health exposes a Eureka-friendly process health response.
+func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "UP"}); err != nil {
+		klog.Errorf("[Health] failed to encode result: %v", err)
+	}
 }
 
 func (h *Handler) Filter(w http.ResponseWriter, r *http.Request) {
