@@ -53,6 +53,11 @@ spec:
       name: scheduler-config
       readOnly: true
   dnsPolicy: ClusterFirstWithHostNet
+  dnsConfig:
+    options:
+    # 优先查询完整 Service 域名，避免搜索域请求耗尽 Extender 的超时预算。
+    - name: ndots
+      value: "1"
   hostNetwork: true
   priorityClassName: system-node-critical
   securityContext:

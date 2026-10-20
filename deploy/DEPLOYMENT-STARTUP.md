@@ -218,6 +218,18 @@ extenders:
 
 当前集群运行 Kubernetes 1.22.9，可使用 [`kube-scheduler-config-v1beta2.yaml`](kube-scheduler-config-v1beta2.yaml) 中的组件配置片段。将 `profiles` 和 `extenders` 合并到现有 `KubeSchedulerConfiguration`，不要覆盖控制平面原有的认证、leader election 等设置。kube-scheduler 为 hostNetwork Pod 时应使用 `dnsPolicy: ClusterFirstWithHostNet`，以便解析 Service DNS。
 
+当前服务器的宿主机搜索域包含 `localdomain`。默认 `ndots:5` 会先展开 Extender 的 Service 域名，错误后缀查询可能被转发到不可达的外部 DNS，耗尽 Extender 请求超时。静态 Pod 示例使用以下设置，优先查询带点的完整域名：
+
+```yaml
+dnsPolicy: ClusterFirstWithHostNet
+dnsConfig:
+  options:
+    - name: ndots
+      value: "1"
+```
+
+修改静态 Pod 清单前备份原文件；kubelet 会自动重建调度器，期间新调度会短暂停顿，已有业务容器继续运行。重建后检查容器实际 `resolv.conf`，确认集群 DNS 地址及 `ndots:1` 生效。
+
 ### 集成方式 RBAC
 
 当前节点保护代码需要：
