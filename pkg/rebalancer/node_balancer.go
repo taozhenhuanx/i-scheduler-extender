@@ -27,6 +27,7 @@ import (
 
 const autoCordonAnnotation = "scheduler.example.com/auto-cordoned"
 
+// Config 是由 SchedulerPolicy 转换后的运行时策略；权重采用 0～1 比例，阈值采用百分比。
 type Config struct {
 	CheckInterval       time.Duration
 	CPUWeight           float64
@@ -39,6 +40,7 @@ type Config struct {
 	TopNodesCount       int
 }
 
+// Balancer 执行一轮节点保护，复用 Operator 的客户端和当前策略，不负责迁移已有 Pod。
 type Balancer struct {
 	client        kubernetes.Interface
 	dynamicClient dynamic.Interface
@@ -259,6 +261,7 @@ func (b *Balancer) Reconcile(ctx context.Context) error {
 	return errors.Join(reconcileErrors...)
 }
 
+// manages 判断节点是否属于 cordon 管理范围，该范围不会绕过 Extender 的内存准入。
 func (b *Balancer) manages(node corev1.Node) bool {
 	_, ignored := b.config.IgnoreNodes[node.Name]
 	return !ignored && matchesNodeSelector(node, b.config.NodeSelector)
@@ -296,6 +299,8 @@ func (b *Balancer) available(node corev1.Node, metrics map[string]unstructured.U
 	return err == nil
 }
 
+// definitelyRejected 区分确定未写入的 API 拒绝与结果不明确的错误。
+// 确定拒绝可继续处理其他节点；超时、断连等错误可能已写入，须停止本轮新增 cordon。
 func definitelyRejected(err error) bool {
 	return apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) ||
 		apierrors.IsBadRequest(err) || apierrors.IsNotFound(err) || apierrors.IsConflict(err) ||
@@ -315,6 +320,7 @@ func validateConfig(config Config) error {
 	return nil
 }
 
+// ParseNodeSelector 解析逗号分隔的 key=value 标签条件，拒绝同一 key 的冲突值。
 func ParseNodeSelector(raw string) (map[string]string, error) {
 	selector := make(map[string]string)
 	raw = strings.TrimSpace(raw)

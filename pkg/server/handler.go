@@ -9,15 +9,17 @@ import (
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
-// Handler 处理器
+// Handler 将 kube-scheduler 的 HTTP 请求交给共享的 Extender，沿用请求取消信号。
 type Handler struct {
 	ex *extender.Extender
 }
 
+// NewHandler 复用 manager 创建的 Extender，使各 HTTP 接口共享权重和内存预留。
 func NewHandler(ex *extender.Extender) *Handler {
 	return &Handler{ex: ex}
 }
 
+// Routes 注册调度协议和健康接口；/priority 保留为 /prioritize 的兼容别名。
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/filter", h.Filter)
@@ -29,7 +31,7 @@ func (h *Handler) Routes() http.Handler {
 	return mux
 }
 
-// Health exposes a Eureka-friendly process health response.
+// Health 返回可供 Eureka 使用的进程存活响应，leader 初始化就绪由 manager 的 /readyz 检查。
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -43,6 +45,7 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Filter 解析候选节点和待调度 Pod，按 Extender 协议在 HTTP 200 的响应体中返回业务错误。
 func (h *Handler) Filter(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
@@ -72,6 +75,7 @@ func (h *Handler) Filter(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// FilterOnlyOne 提供可选的单节点选择接口，先做内存准入，再选择最高分节点。
 func (h *Handler) FilterOnlyOne(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
@@ -99,6 +103,7 @@ func (h *Handler) FilterOnlyOne(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Prioritize 返回候选节点的实测负载分数，由 kube-scheduler 与原生插件分数合并。
 func (h *Handler) Prioritize(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
@@ -124,6 +129,7 @@ func (h *Handler) Prioritize(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Bind 解析绑定参数，委托 Extender 重验内存、登记预留并调用 API Server 绑定 Pod。
 func (h *Handler) Bind(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 

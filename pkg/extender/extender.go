@@ -28,18 +28,21 @@ type Extender struct {
 	// DynamicClient 用于访问 metrics.k8s.io 等非核心 API。
 	DynamicClient dynamic.Interface
 
+	// 权重成对读写，保证一次评分使用同一版 CPU/内存策略。
 	weightsMu    sync.RWMutex
 	cpuWeight    float64
 	memoryWeight float64
 
-	admissionMu    sync.Mutex
-	metricsMu      sync.Mutex
-	metricsAt      time.Time
-	metricsErr     error
-	metricsByNode  map[string]map[string]interface{}
-	podMemoryMu    sync.Mutex
-	podMemoryAt    time.Time
-	podMemory      *podMemorySnapshot
+	// Filter、Bind 和启动预留重建串行执行，保证 Bind 的重验与预算登记对后续准入可见。
+	admissionMu   sync.Mutex
+	metricsMu     sync.Mutex
+	metricsAt     time.Time
+	metricsErr    error
+	metricsByNode map[string]map[string]interface{}
+	podMemoryMu   sync.Mutex
+	podMemoryAt   time.Time
+	podMemory     *podMemorySnapshot
+	// 预留表按 Pod UID 保存；其锁只保护表的读写，准入完整流程由 admissionMu 保护。
 	pendingMemMu   sync.Mutex
 	pendingMemory  map[string]pendingMemoryReservation
 	filterTieBreak atomic.Uint64
@@ -64,12 +67,12 @@ func (ex *Extender) scoringWeights() (float64, float64) {
 	return ex.cpuWeight, ex.memoryWeight
 }
 
+// NewExtender 使用默认 CPU 10%、内存 90% 的实测负载评分权重。
 func NewExtender() *Extender {
 	return NewExtenderWithWeights(0.1, 0.9)
 }
 
-// NewExtenderWithWeights creates an extender whose scoring weights match the
-// node load protection configuration.
+// NewExtenderWithWeights 自行加载集群配置并创建客户端；Operator 使用共享客户端构造方法。
 func NewExtenderWithWeights(cpuWeight, memoryWeight float64) *Extender {
 	config, err := NewConfig()
 	if err != nil {
@@ -119,6 +122,7 @@ func (ex *Extender) nodeMetrics(ctx context.Context) (map[string]map[string]inte
 	metrics, err := ex.DynamicClient.Resource(nodeusage.NodeMetricsGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		if ctx.Err() != nil {
+			// 单次请求取消不代表指标服务故障，不缓存该错误以免影响后续调度请求。
 			return nil, err
 		}
 		ex.metricsByNode = nil

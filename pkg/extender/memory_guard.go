@@ -47,11 +47,14 @@ func decideMemoryGuard(currentPercent, projectedPercent float64, isBlocked bool)
 	return memoryGuardAllow
 }
 
+// podMemorySnapshot 记录 Pod 状态及读取起点，用于区分绑定前的旧快照和最新 API 状态。
 type podMemorySnapshot struct {
 	pods       map[string]*corev1.Pod
 	observedAt time.Time
 }
 
+// pendingMemoryReservation 补足绑定、容器启动和指标采样之间的预算空隙，不使用固定 TTL。
+// UID 区分同名重建的 Pod；createdAt 防止旧列表快照把刚登记的预留误判为已删除。
 type pendingMemoryReservation struct {
 	podKey    string
 	podUID    types.UID
@@ -70,7 +73,7 @@ func terminalPod(pod *corev1.Pod) bool {
 }
 
 // podMemoryCovered 要求所有应用容器和可重启 init 容器均已运行且被完整采样窗口覆盖。
-// 镜像拉取、普通 init 执行及容器重启等待期间继续计入预算；nodeName 本身不能证明覆盖。
+// 对尚未释放的预留，镜像拉取、普通 init 执行及容器重启等待期间继续计入预算；nodeName 本身不能证明覆盖。
 func podMemoryCovered(pod *corev1.Pod, metric map[string]interface{}, now time.Time) bool {
 	start, err := memorySampleStart(metric, now)
 	if err != nil || len(pod.Spec.Containers) == 0 {

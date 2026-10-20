@@ -1,4 +1,4 @@
-// Package nodeusage contains shared helpers for calculating node resource usage.
+// Package nodeusage 为 Extender 和节点负载保护提供统一的资源用量、预算及采样校验。
 package nodeusage
 
 import (
@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// NodeMetricsGVR identifies node usage resources in the Kubernetes Metrics API.
+// NodeMetricsGVR 指向 Metrics API 的节点指标资源，用于读取实测 CPU 和内存用量。
 var NodeMetricsGVR = schema.GroupVersionResource{Group: "metrics.k8s.io", Version: "v1beta1", Resource: "nodes"}
 
 const (
@@ -92,7 +92,7 @@ func WeightedUsagePercentage(node corev1.Node, metric map[string]interface{}, cp
 	return (cpuPercentage*cpuWeight + memoryPercentage*memoryWeight) / totalWeight, nil
 }
 
-// MemoryUsageBytes returns the current memory usage reported for a node.
+// MemoryUsageBytes 解析指标中的节点实测内存，返回字节数，拒绝缺失、非法或负数用量。
 func MemoryUsageBytes(metric map[string]interface{}) (int64, error) {
 	usage, ok, err := unstructured.NestedMap(metric, "usage")
 	if err != nil || !ok {
@@ -105,7 +105,7 @@ func MemoryUsageBytes(metric map[string]interface{}) (int64, error) {
 	return memory.Value(), nil
 }
 
-// MemoryAllocatableBytes returns the node's allocatable memory.
+// MemoryAllocatableBytes 返回节点可分配内存，作为准入占比的分母，容量必须为正数。
 func MemoryAllocatableBytes(node corev1.Node) (int64, error) {
 	allocatable := node.Status.Allocatable[corev1.ResourceMemory]
 	if allocatable.Sign() <= 0 {
@@ -126,12 +126,14 @@ func PodMemoryReservationBytes(pod corev1.Pod) int64 {
 	for _, container := range pod.Spec.InitContainers {
 		containerMemory := containerMemoryReservation(container)
 		if container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			// 可重启 init 容器作为 sidecar 持续运行，后续 init 和应用阶段都需要加上它。
 			sidecarMemory.Add(containerMemory)
 			if sidecarMemory.Cmp(initPeak) > 0 {
 				initPeak = sidecarMemory.DeepCopy()
 			}
 			continue
 		}
+		// 普通 init 依次运行，本阶段预算为当前 init 加上此前启动的所有 sidecar。
 		initStageMemory := sidecarMemory.DeepCopy()
 		initStageMemory.Add(containerMemory)
 		if initStageMemory.Cmp(initPeak) > 0 {
@@ -139,6 +141,7 @@ func PodMemoryReservationBytes(pod corev1.Pod) int64 {
 		}
 	}
 
+	// 取应用阶段与 init 阶段的较大预算，再计入 Pod Overhead。
 	appMemory.Add(sidecarMemory)
 	if initPeak.Cmp(appMemory) > 0 {
 		appMemory = initPeak
@@ -149,6 +152,7 @@ func PodMemoryReservationBytes(pod corev1.Pod) int64 {
 	return appMemory.Value()
 }
 
+// containerMemoryReservation 优先使用正数 request，仅在缺省或非正数时回退 limit，保留超卖空间。
 func containerMemoryReservation(container corev1.Container) resource.Quantity {
 	request := container.Resources.Requests[corev1.ResourceMemory]
 	if request.Sign() > 0 {

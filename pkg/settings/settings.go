@@ -1,4 +1,4 @@
-// Package settings loads the operator process settings from a YAML file.
+// Package settings 从 YAML 加载 Operator 进程配置，集群策略由 SchedulerPolicy 管理。
 package settings
 
 import (
