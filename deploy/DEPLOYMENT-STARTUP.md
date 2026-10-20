@@ -1,75 +1,45 @@
 # i-scheduler-extender Operator 部署文档
 
-## 1. 方案说明
+## 1. 部署方案与文件入口
 
-进程由 Kubebuilder/controller-runtime manager 管理。集群级 `SchedulerPolicy/cluster` 是调度策略的期望状态；controller 监听策略和 Node 变化，并按 CR 的 spec 协调节点负载保护和 Scheduler Extender 的打分权重。同一 manager 还托管 Scheduler Extender HTTP 接口。调度打分和节点保护通过 `metrics.k8s.io/v1beta1` 读取节点实际 CPU 和内存使用率。Filter/Bind 使用节点实测内存、尚未被采样覆盖的预约及新 Pod 预算；新 Pod 优先使用正数 request，没有正数 request 时回退到 limit。预计占用超过 Allocatable 的 80% 时标记并排除节点；当前值加预约降至 75% 以下且新 Pod 不会突破 80% 时解除标记。
+当前分支使用 Kubebuilder/controller-runtime manager 运行 Operator，集群级 `SchedulerPolicy/cluster` 管理调度权重、阈值和节点保护策略。同一 manager 提供 Scheduler Extender HTTP 接口，由集群已有的默认 kube-scheduler 调用。接入完成后，业务 Pod 省略 `schedulerName` 即经过 `/filter`、`/prioritize` 和 `/bind`。
 
-80% 是调度预测门槛，不是物理内存绝对上限：Metrics API 存在采样延迟，Pod 可能超过 request，且未经过此 Extender 的调度路径不受拦截。实际拒绝由 Extender 的 Filter/Bind 执行。
+Operator 的 Namespace、CRD、RBAC、ConfigMap、Deployment 和 Service 统一由 `config/` 下的 Kustomize 配置维护。`deploy/` 保存当前方案的说明、控制平面配置示例和验证 Pod：
 
-项目提供三种部署方式：
+| 文件 | 用途 |
+|---|---|
+| [DEPLOYMENT-STARTUP.md](DEPLOYMENT-STARTUP.md) | 构建、安装、接入默认调度器、升级和卸载 |
+| [NODEBALANCER-CONFIG.md](NODEBALANCER-CONFIG.md) | SchedulerPolicy 字段和节点管理规则 |
+| [SCHEDULING-LOGIC.md](SCHEDULING-LOGIC.md) | 调度逻辑和功能验证 |
+| [DEPLOYMENT-20261020.md](DEPLOYMENT-20261020.md) | 当前服务器的部署、扩容和验证记录 |
+| [kube-scheduler-config-v1beta2.yaml](kube-scheduler-config-v1beta2.yaml) | Kubernetes 1.22 的默认调度器配置示例 |
+| [kube-scheduler-static-pod.yaml](kube-scheduler-static-pod.yaml) | 默认调度器的启动参数、挂载和 DNS 示例 |
+| [scheduler-extender-check-local.yaml](scheduler-extender-check-local.yaml) | 使用当前节点缓存镜像的验证 Pod |
 
-- `make deploy`：通过 Kubebuilder 的 Kustomize 配置安装 CRD、manager 和 Extender Service；首次部署还需要创建 `SchedulerPolicy/cluster`。
-- `manifest.yaml`：在一个 Deployment 中运行自定义 `kube-scheduler` 和 Extender。业务 Pod 需要设置 `schedulerName: i-scheduler-extender`。
-- `manifest-integrated.yaml`：只运行 Extender，复用已有 kube-scheduler。需要把 Extender 配置加入已有 scheduler，业务 Pod 使用默认 scheduler。
+详细准入、实测打分和预留释放流程见 [调度逻辑](SCHEDULING-LOGIC.md)。80% 内存门槛是采样与预算计算出的调度预测值；运行中的 Pod 可能超过 request，实际占用仍可能越过门槛。
 
-### 单实例接管和启动旁路
+## 2. 前置条件与镜像构建
 
-保持 `replicas: 1` 和 `Recreate`。只有 leader 在完成当前策略加载、重建过渡期内存预算并开始监听 HTTP 后，`/readyz` 才返回成功；standby 不监听调度端口。升级时旧 Pod 先退出，新 leader 再初始化并接管，期间依赖 Extender 的新调度会暂停。
+- 可以访问集群 API Server，并具备修改控制平面 kube-scheduler 配置的权限。
+- Metrics Server 正常，`kubectl top nodes` 可以返回指标。
+- Operator 运行节点 Ready、有资源余量，且没有磁盘或内存压力。
+- 所有可能运行 Operator 的节点能取得相应架构的镜像。
 
-若默认 kube-scheduler 已接入此 Extender，新 Operator Pod 也会依赖该服务完成调度。必须在首次接入默认 scheduler 前为 Operator 配置启动旁路，并在后续升级中保留。`config/bootstrap` 在 Pod 中指定 `nodeName`，使 kubelet 直接接管；`extenders` 是 kube-scheduler 所有 profile 共用的配置，单纯新增一个 profile 不能绕过它。
-
-当前单节点服务器使用 `m1`。在其他集群部署前，先修改 [manager_bootstrap_patch.yaml](../config/bootstrap/manager_bootstrap_patch.yaml) 中的 `nodeName` 为实际可用节点，确认该节点有运行 Operator 的容量，然后渲染部署：
+在仓库根目录执行：
 
 ```bash
+kubectl config current-context
 kubectl get nodes
-# 修改 patch 中的节点名；渲染检查 nodeName 和 Recreate。
-kubectl kustomize config/bootstrap > /tmp/i-scheduler-extender-bootstrap.yaml
-# 镜像构建并推送后，设置实际镜像地址并部署同一个 bootstrap 入口。
-make deploy-bootstrap IMG=registry.example.com/platform/i-scheduler-extender:v1
-kubectl -n i-scheduler-extender-system rollout status deployment/i-scheduler-extender-controller-manager
-```
-
-此入口包含 CRD、RBAC、manager 和 Service；首次安装仍需创建 `SchedulerPolicy/cluster`。采用此入口后，升级继续使用 `make deploy-bootstrap`；`make deploy` 使用 `config/default`，不会自动包含节点旁路。`nodeName` 会固定 Operator 的运行节点并绕过 scheduler 的节点选择，节点失效时需修改该字段；该方式适合当前单节点部署。
-
-使用旧的 `deploy/manifest-integrated.yaml` 时，需要在其 Deployment 的 `spec.template.spec` 添加同样的 `nodeName` 后部署。独立 scheduler 的组合清单可由未接入 Extender 的默认 scheduler 启动。
-
-### 内存预算接管
-
-Bind 前按 Pod UID 登记内存预算，设置 `nodeName` 后继续保留。所有应用容器与可重启 init 容器启动，且 NodeMetrics 的完整采样窗口覆盖其启动时间后才释放；启动等待不使用固定 TTL 清账。Pod 删除、终止或 UID 替换时清理旧预约。新 leader 在监听 HTTP 前重建未被采样覆盖的已绑定 Pod 预算，稳定 Pod 使用实测内存。
-
-内存准入要求指标包含有效 `timestamp` 和 `window`，样本不超过 2 分钟，最多允许 10 秒的未来时钟偏差。过旧、无效或缺失指标会阻止对应节点准入。Bind 超时或冲突时保留预约，同一 Pod 只重试原节点，避免结果不确定时丢失旧节点预算。
-
-自建集群可以根据控制面权限选择方式。ACK 托管集群通常不能修改控制面 kube-scheduler，建议使用第一种方式。
-
-## 2. 前置条件
-
-- 集群 API Server 可访问；
-- Metrics Server 正常运行，`kubectl top nodes` 可以返回数据；
-- Extender 镜像已推送到集群可访问的镜像仓库；
-- kube-scheduler 镜像版本与目标 Kubernetes 集群兼容。
-
-检查 Metrics：
-
-```bash
 kubectl top nodes
+make docker-build IMG=registry.example.com/platform/i-scheduler-extender:v1
+make docker-push IMG=registry.example.com/platform/i-scheduler-extender:v1
 ```
 
-## 3. 构建镜像
+需要构建并推送多架构镜像时，使用 `make build-image IMG=...`。当前单节点 Docker 集群也可使用节点本机已有镜像，Deployment 的 `imagePullPolicy` 为 `IfNotPresent`；本机缓存不会自动分发到其他节点。本次实际镜像构建方式见 [部署记录](DEPLOYMENT-20261020.md#镜像构建方式)。
 
-```bash
-cd /data/scheduler/i-scheduler-extender
-make build-image IMG=registry.example.com/platform/i-scheduler-extender:v1
-```
+## 3. 进程配置与 SchedulerPolicy
 
-然后将清单中的镜像替换为实际地址：
-
-```yaml
-image: registry.example.com/platform/i-scheduler-extender:v1
-```
-
-## 4. 配置文件
-
-进程启动选项集中在 [`../config/manager/scheduler.yaml`](../config/manager/scheduler.yaml)：
+进程配置位于 [config/manager/scheduler.yaml](../config/manager/scheduler.yaml)，Kustomize 将它生成 ConfigMap：
 
 ```yaml
 metricsBindAddress: "0"
@@ -78,7 +48,7 @@ extenderBindAddress: ":8080"
 leaderElection: true
 ```
 
-该文件只配置 manager、metrics、健康检查和 Extender HTTP 服务，不包含集群调度策略。策略通过集群级 `SchedulerPolicy/cluster` CR 设置：
+安装 CRD 并创建策略：
 
 ```bash
 make install
@@ -86,118 +56,57 @@ kubectl wait --for=condition=Established --timeout=60s crd/schedulerpolicies.sch
 kubectl apply -f config/samples/scheduler_v1alpha1_schedulerpolicy.yaml
 ```
 
-`SchedulerPolicy` 字段包括检查周期、CPU/内存权重百分比、高负载/恢复阈值、可调度节点下限、Top N、节点标签选择器和忽略节点列表。示例与字段注释见 [`../config/samples/scheduler_v1alpha1_schedulerpolicy.yaml`](../config/samples/scheduler_v1alpha1_schedulerpolicy.yaml) 和 [`../api/v1alpha1/schedulerpolicy_types.go`](../api/v1alpha1/schedulerpolicy_types.go)。更新策略对象后 controller 会自动协调；`kubectl get schedulerpolicy cluster` 可查看 Ready 状态。
+策略样例使用 CPU/内存权重 `10/90`、高负载/恢复阈值 `70/65`、最少可用节点 `4`、Top N `9`、周期 `5` 秒，`nodeSelector: {}` 管理所有节点。根据实际集群调整管理范围和下限，字段含义见 [策略配置说明](NODEBALANCER-CONFIG.md)。单节点设置下限为 4 时，不会新增自动 cordon；Extender 内存准入独立工作。
 
-### Top N 语义
-
-`spec.topNodesCount: 9` 是硬限制：程序将受管可用节点按综合使用率从高到低排序，只对前 9 个节点做高负载 cordon 判断。无效指标或故障节点不占名额；该排序的第 10 个节点即使使用率达到 95%，也不会因为本轮 Top N 规则被新 cordon。
-
-如果希望所有受管节点都有机会参与处理，应将它设置为不小于白名单节点数量。`spec.minSchedulableNodes` 阻止新增 cordon 将受管可用节点降到下限以下；可用节点须 Ready、未删除、未 cordon、指标有效且新鲜，且无内存保护标记及 `NoSchedule`/`NoExecute` taint。已有故障导致数量不足时停止新增 cordon。
-
-## 5. 方式一：独立 kube-scheduler
-
-### 5.1 部署
-
-`manifest.yaml` 会在一个 Pod 中启动自定义 kube-scheduler 和 Extender，Extender 地址通过 `localhost:8080` 访问：
-
-```text
-自定义 kube-scheduler -> localhost:8080 -> i-scheduler-extender
-          |
-          +-------------> Kubernetes API Server
-```
-
-部署命令（CRD 必须先于使用它的 manager 安装）：
-
-```bash
-kubectl apply -f config/crd/bases/scheduler.example.com_schedulerpolicies.yaml
-kubectl wait --for=condition=Established --timeout=60s crd/schedulerpolicies.scheduler.example.com
-kubectl apply -f config/samples/scheduler_v1alpha1_schedulerpolicy.yaml
-kubectl apply -f deploy/manifest.yaml
-kubectl -n kube-system rollout status deployment/i-scheduler-extender
-kubectl -n kube-system get pod -l component=i-scheduler-extender -o wide
-```
-
-该清单的 scheduler profile 是：
-
-```yaml
-profiles:
-  - schedulerName: i-scheduler-extender
-```
-
-所以业务 Pod 需要：
-
-```yaml
-spec:
-  schedulerName: i-scheduler-extender
-```
-
-### 5.2 测试
-
-Extender 根据实时加权使用率给内存安全的候选节点打 0–10 分，负载越低分数越高。默认权重是 CPU 10%、内存 90%；动态评分遇到指标错误时会返回中性分。内存保护则会在无法读取 Metrics API 或集群 Pod 列表时拒绝本轮调度，以免在未知容量下放行 Pod。Metrics API 本地缓存时间为 5 秒。
-
-测试前确认 Metrics Server 可用：
-
-```bash
-kubectl top nodes
-```
-
-无需给节点添加优先级标签。测试 Pod 必须声明正数的内存 request 或 limit；调度预算优先按 request 计算，未设置正数 request 时使用 limit。
-
-测试 Pod：
-
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: scheduler-extender-test
-spec:
-  schedulerName: i-scheduler-extender
-  containers:
-    - name: test
-      image: busybox:1.36
-      command: ["sleep", "3600"]
-      resources:
-        requests:
-          memory: 64Mi
-        limits:
-          memory: 128Mi
-```
-
-检查：
-
-```bash
-kubectl get pod scheduler-extender-test -o wide
-kubectl describe pod scheduler-extender-test
-kubectl -n kube-system logs deployment/i-scheduler-extender -c i-scheduler-extender --tail=100
-```
-
-### 5.3 修改策略
-
-修改并应用 `SchedulerPolicy/cluster`，controller 会自动加载新策略：
+更新现有策略时，编辑 CR 或应用自己的策略文件，避免用默认样例覆盖已定制的值：
 
 ```bash
 kubectl edit schedulerpolicy cluster
 kubectl get schedulerpolicy cluster -o yaml
 ```
 
-只有进程监听或 manager 启动选项变更时才需要修改 [scheduler.yaml](../config/manager/scheduler.yaml) 并重启 manager。组合清单使用相同的 CRD 和 `SchedulerPolicy/cluster` API；不需要修改控制面节点上的 `/etc/kubernetes/manifests/kube-scheduler.yaml`。
+策略修改由 controller 自动协调。进程配置修改则需要重启 Operator，后续操作见第 7 节。
 
-## 6. 方式二：集成已有 kube-scheduler
+## 4. 安装 Operator
 
-这种方式只部署 Extender，已有 kube-scheduler 通过 Service 调用它。先确保 CRD 和策略对象已安装，再部署 Extender：
+### 单实例接管和启动旁路
+
+保持 `replicas: 1` 和 `Recreate`。只有 leader 加载策略、重建尚未被指标覆盖的 Pod 预留并开始监听 HTTP 后，`/readyz` 才通过。升级时旧实例先退出，新实例再初始化；期间依赖 Extender 的新调度会暂停，已有业务容器继续运行。
+
+在首次接入默认 scheduler 前，为 Operator 配置启动旁路并在升级中保留。否则新 Operator Pod 会依赖自身尚未启动的 HTTP 服务完成调度。`config/bootstrap` 使用 `nodeName`，由 kubelet 直接接管 Operator；额外 scheduler profile 不能绕过 kube-scheduler 全局共用的 `extenders`。
+
+先修改 [manager_bootstrap_patch.yaml](../config/bootstrap/manager_bootstrap_patch.yaml) 的 `nodeName`，当前服务器为 `m1`。确认节点可用后执行：
 
 ```bash
-kubectl apply -f config/crd/bases/scheduler.example.com_schedulerpolicies.yaml
-kubectl wait --for=condition=Established --timeout=60s crd/schedulerpolicies.scheduler.example.com
-kubectl apply -f config/samples/scheduler_v1alpha1_schedulerpolicy.yaml
-kubectl apply -f deploy/manifest-integrated.yaml
-kubectl -n kube-system rollout status deployment/i-scheduler-extender
-kubectl -n kube-system get svc i-scheduler-extender
+kubectl get nodes
+kubectl kustomize config/bootstrap > /tmp/i-scheduler-extender-bootstrap.yaml
+# 检查渲染后的 nodeName 和 Recreate，再设置实际镜像进行部署。
+make deploy-bootstrap IMG=registry.example.com/platform/i-scheduler-extender:v1
+kubectl -n i-scheduler-extender-system rollout status deployment/i-scheduler-extender-controller-manager --timeout=180s
+kubectl -n i-scheduler-extender-system get pods -o wide
+kubectl -n i-scheduler-extender-system get endpoints i-scheduler-extender-http
 ```
 
-在已有 `KubeSchedulerConfiguration` 中合并下面的配置：
+`make deploy-bootstrap` 包含 CRD、RBAC、manager 和 Service。`make deploy` 使用 `config/default`，不包含启动旁路；当前默认调度器接入方案的安装与升级使用 bootstrap 入口。
+
+`nodeName` 固定运行节点，该节点失效时需要调整 patch；它不会绕过 kubelet 的磁盘压力准入。当前单节点使用此方案，多节点部署时需要明确 Operator 的可用运行节点。
+
+## 5. 接入默认 kube-scheduler
+
+### 控制平面需要修改的两份配置
+
+当前服务器采用 kubeadm 静态 Pod，需要在控制平面节点修改以下两份文件：
+
+| 服务器文件 | 修改内容 |
+|---|---|
+| `/etc/kubernetes/scheduler-config.yaml` | 保留 `default-scheduler` profile，增加 Extender 地址及三个接口 |
+| `/etc/kubernetes/manifests/kube-scheduler.yaml` | 添加 `--config` 和文件挂载，设置集群 DNS 与 `ndots: "1"` |
+
+修改前备份两份文件，静态 Pod 的备份放在 `/etc/kubernetes/manifests` 之外。在现有 `KubeSchedulerConfiguration` 中合并以下字段，保留原有的认证、leader election 和其他 profiles：
 
 ```yaml
+profiles:
+  - schedulerName: default-scheduler
 extenders:
   - urlPrefix: "http://i-scheduler-extender-http.i-scheduler-extender-system.svc.cluster.local:8080"
     enableHTTPS: false
@@ -208,26 +117,9 @@ extenders:
     weight: 1
 ```
 
-注意：
+配置 API 版本必须与 kube-scheduler 兼容。当前 Kubernetes 1.22 使用 [v1beta2 示例](kube-scheduler-config-v1beta2.yaml)；其他版本按实际支持的配置 API 调整。
 
-- `apiVersion` 必须使用目标 kube-scheduler 实际支持的版本；
-- 保留原有 leader election、认证、TLS 和 profiles 配置；
-- 已有 `profiles` 时只合并 `extenders`，不要重复添加 profile；
-- kube-scheduler 必须能访问 Extender Service DNS；Kubebuilder 部署的 Service 地址是 `i-scheduler-extender-http.i-scheduler-extender-system.svc.cluster.local:8080`；
-- 集成方式下业务 Pod 不需要设置 `schedulerName`。
-
-当前集群运行 Kubernetes 1.22.9，可使用 [`kube-scheduler-config-v1beta2.yaml`](kube-scheduler-config-v1beta2.yaml) 中的组件配置片段。将 `profiles` 和 `extenders` 合并到现有 `KubeSchedulerConfiguration`，不要覆盖控制平面原有的认证、leader election 等设置。kube-scheduler 为 hostNetwork Pod 时应使用 `dnsPolicy: ClusterFirstWithHostNet`，以便解析 Service DNS。
-
-### 控制平面需要修改的两份配置
-
-当前服务器采用 kubeadm 静态 Pod。接入默认调度器需要在控制平面节点修改以下两份文件：
-
-| 服务器文件 | 修改内容 |
-|---|---|
-| `/etc/kubernetes/scheduler-config.yaml` | 保留 `default-scheduler` profile，增加上述 `extenders`，让调度器调用 `/filter`、`/prioritize`、`/bind` |
-| `/etc/kubernetes/manifests/kube-scheduler.yaml` | 添加 `--config` 启动参数和配置文件挂载；设置集群 DNS 策略及下方的 `ndots: "1"` |
-
-在现有静态 Pod 清单中合并以下字段，保留其他启动参数和挂载。完整示例见 [kube-scheduler-static-pod.yaml](kube-scheduler-static-pod.yaml)：
+在已有静态 Pod 中合并以下字段，保留其他启动参数和挂载。完整示例见 [kube-scheduler-static-pod.yaml](kube-scheduler-static-pod.yaml)：
 
 ```yaml
 spec:
@@ -241,6 +133,11 @@ spec:
         - name: scheduler-config
           mountPath: /etc/kubernetes/scheduler-config.yaml
           readOnly: true
+  dnsPolicy: ClusterFirstWithHostNet
+  dnsConfig:
+    options:
+      - name: ndots
+        value: "1"
   volumes:
     - name: scheduler-config
       hostPath:
@@ -248,131 +145,91 @@ spec:
         type: File
 ```
 
-这是部署时对控制平面进行的配置操作。`make deploy`、`make deploy-bootstrap` 和 Operator 的 `SchedulerPolicy` CR 都不会自动修改这两份服务器文件；CR 管理权重、阈值和节点保护策略。接入完成后，省略 `schedulerName` 的业务 Pod 使用 `default-scheduler`，因此会经过 Extender。新集群也需要完成这一接入步骤。
+当前 kube-scheduler 使用 hostNetwork，`ClusterFirstWithHostNet` 使容器使用集群 DNS。宿主机搜索域包含 `localdomain`，默认 `ndots:5` 会先展开 Extender 域名，错误后缀可能转发到超时的外部 DNS。`ndots:1` 让带点的完整 Service 名称优先直接查询。
 
-当前服务器的宿主机搜索域包含 `localdomain`。默认 `ndots:5` 会先展开 Extender 的 Service 域名，错误后缀查询可能被转发到不可达的外部 DNS，耗尽 Extender 请求超时。静态 Pod 示例使用以下设置，优先查询带点的完整域名：
+这些是部署时的控制平面配置操作。`make deploy`、`make deploy-bootstrap` 和 `SchedulerPolicy` CR 都不会自动修改这两份服务器文件。新集群需要完成接入后，省略 `schedulerName` 的业务 Pod 才会经过 Extender。
 
-```yaml
-dnsPolicy: ClusterFirstWithHostNet
-dnsConfig:
-  options:
-    - name: ndots
-      value: "1"
-```
+### 重新加载配置
 
-修改前备份两份文件，将静态 Pod 的备份放在 `/etc/kubernetes/manifests` 之外。修改静态 Pod 清单的实际内容后，kubelet 会自动重建调度器，期间新调度会短暂停顿，已有业务容器继续运行。**仅修改挂载的 `scheduler-config.yaml` 不会触发重建，kube-scheduler 也不会自动重新加载该配置**；后续单独更新它时，还需要修改静态 Pod 的配置版本 annotation 等内容，触发重建。仅删除 API 中的镜像 Pod 不会重启静态 Pod 容器。
-
-重建后检查容器实际 `resolv.conf`，确认集群 DNS 地址及 `ndots:1` 生效，并结合调度器日志和 Extender 的 `bound pod` 日志确认接入。当前服务器的实际改动和验证结果见 [本次部署记录](DEPLOYMENT-20261020.md)。
-
-### 集成方式 RBAC
-
-当前节点保护代码需要：
-
-```text
-core/nodes            get, list, patch
-core/pods             get, list
-core/pods/binding     create
-scheduler.example.com/schedulerpolicies get, list, watch, update, patch
-scheduler.example.com/schedulerpolicies/status get, update, patch
-metrics.k8s.io/nodes  get, list
-```
-
-先安装 CRD 并创建 `SchedulerPolicy/cluster`，再启动任一 manager 部署方式。`manifest.yaml` 为了示例快速运行使用了 `cluster-admin`，生产环境应拆分 ServiceAccount 并收紧权限。`manifest-integrated.yaml` 的 ClusterRole 按当前代码授予上述权限：读取 Metrics API、统计 Pod 内存预算、维护 Node 内存保护标签，以及执行 Bind。
-
-## 7. ACK 托管集群
-
-ACK 托管控制面通常不能编辑：
-
-```text
-/etc/kubernetes/manifests/kube-scheduler.yaml
-```
-
-不能只部署 `manifest-integrated.yaml` 就让 ACK 内置 scheduler 自动调用 Extender。推荐运行独立的自定义 scheduler，并让目标业务 Pod 设置：
-
-```yaml
-spec:
-  schedulerName: i-scheduler-extender
-```
-
-ACK 部署注意事项：
-
-- kube-scheduler 镜像版本应与 ACK 集群版本兼容；
-- 不要假设控制面节点上的 kubeconfig 可以挂载到业务 Pod；
-- 使用 ServiceAccount 的 in-cluster 配置连接 API Server；
-- 不要把管理员 kubeconfig 或长期凭据写入镜像；
-- 如果不希望业务 YAML 写 `schedulerName`，可以另行实现 Mutating Admission Webhook 自动注入，但 Webhook 不能代替自定义 scheduler；
-- 本项目当前不包含 Webhook 实现。
-
-## 8. 节点保护行为
-
-每个检查周期执行：
-
-```text
-清理退出策略范围节点的自动 cordon 和过期标记
-    -> 读取 Metrics API，排除缺失、无效或过期的指标
-    -> CPU 10% + 内存 90% 计算综合使用率
-    -> 按综合使用率降序排序
-    -> 取 Top N
-    -> 超过 highThreshold 的节点执行 cordon
-    -> 新增 cordon 不得将受管可用节点降到 minSchedulableNodes 以下
-```
-
-程序通过补丁更新 Node 的调度状态和 `scheduler.example.com/auto-cordoned` 管理标记，例如：
-
-```yaml
-spec:
-  unschedulable: true
-```
-
-不会驱逐已有 Pod。节点退出 `nodeSelector` 或加入 `ignoreNodes` 时，清理本控制器的自动 cordon；没有自动标记的人工 cordon 保留。管理员接管已自动 cordon 的节点时须先移除自动标记，操作见 [策略配置说明](NODEBALANCER-CONFIG.md#管理员接管节点)。
-
-缺失/无效指标及 cordon/uncordon 操作失败会汇总到 CR 的 `Ready=False` 并触发重试，其他节点继续处理；后续完整成功时恢复 `Ready=True`。此状态反映策略协调结果，HTTP `/readyz` 反映 Extender 服务是否已完成初始化并监听。
-
-## 9. 检查、升级和回滚
+修改静态 Pod 清单的实际内容后，kubelet 会重建 kube-scheduler。**仅修改挂载的 `scheduler-config.yaml` 不会触发重建，kube-scheduler 也不会自动重新加载配置**；后续单独更新它时，需要修改静态 Pod 的配置版本 annotation 等内容触发重建。仅删除 API 中的镜像 Pod 不会重启静态 Pod 容器。
 
 ```bash
-kubectl -n kube-system get deployment i-scheduler-extender -o yaml
-kubectl -n kube-system logs deployment/i-scheduler-extender -c i-scheduler-extender --tail=200
+kubectl -n kube-system get pods -l component=kube-scheduler -o wide
+kubectl -n kube-system logs -l component=kube-scheduler --tail=100
+```
+
+确认配置解析正常、调度器 Ready，并核对容器实际 `resolv.conf` 的集群 DNS 地址与 `ndots:1`。本次实际修改及结果见 [部署记录](DEPLOYMENT-20261020.md)。
+
+托管控制面通常无法修改这些文件，仅安装 Operator 不会让其默认调度器自动调用 Extender。此部署流程需要可配置 kube-scheduler 的控制平面。
+
+## 6. 健康检查与调度验证
+
+```bash
+kubectl -n i-scheduler-extender-system get pods -o wide
+kubectl -n i-scheduler-extender-system get endpoints i-scheduler-extender-http
+kubectl get schedulerpolicy cluster -o yaml
 kubectl top nodes
+kubectl -n i-scheduler-extender-system logs deployment/i-scheduler-extender-controller-manager -c manager --since=10m --tail=100
 ```
 
-升级镜像：
+| 信号 | 含义 |
+|---|---|
+| Operator `:8082/healthz` | 进程健康 |
+| Operator `:8082/readyz` | leader 完成初始化且 Extender 已监听 |
+| Extender `:8080/health` | HTTP 服务返回 `{"status":"UP"}` |
+| CR `Ready=True` | 最近一次策略协调完整成功，确认 observedGeneration 与 generation 一致 |
+
+当前服务器已缓存 Alpine 镜像，可以创建验证 Pod：
 
 ```bash
-kubectl -n kube-system set image deployment/i-scheduler-extender \
-  i-scheduler-extender=registry.example.com/platform/i-scheduler-extender:v2
-kubectl -n kube-system rollout status deployment/i-scheduler-extender
+kubectl apply -f deploy/scheduler-extender-check-local.yaml
+kubectl get pod scheduler-extender-check -o wide
+kubectl describe pod scheduler-extender-check
+kubectl -n i-scheduler-extender-system logs deployment/i-scheduler-extender-controller-manager -c manager --since=5m --tail=100
 ```
 
-回滚：
+该 Pod 省略 `schedulerName` 和 `nodeName`。结合默认调度器配置、Pod 的 `Scheduled` 事件和 Operator 的 `bound pod` 日志确认完整链路。镜像缓存示例只适用于已缓存该镜像的节点，其他集群的通用示例和内存门槛验证见 [调度验证](SCHEDULING-LOGIC.md#6-在当前本机集群验证)。完成后删除验证 Pod：
 
 ```bash
-kubectl -n kube-system rollout undo deployment/i-scheduler-extender
+kubectl delete pod scheduler-extender-check
 ```
 
-删除独立 scheduler 部署：
+## 7. 升级、回滚和卸载
+
+升级时保留 bootstrap patch 和单实例 `Recreate`，使用实际新镜像：
 
 ```bash
-kubectl delete -f deploy/manifest.yaml
+make deploy-bootstrap IMG=registry.example.com/platform/i-scheduler-extender:v2
+kubectl -n i-scheduler-extender-system rollout status deployment/i-scheduler-extender-controller-manager --timeout=180s
 ```
 
-删除集成部署：
+修改进程配置后，可重新部署并重启 manager，使其加载更新后的 ConfigMap：
 
 ```bash
-kubectl delete -f deploy/manifest-integrated.yaml
+make deploy-bootstrap IMG=registry.example.com/platform/i-scheduler-extender:v2
+kubectl -n i-scheduler-extender-system rollout restart deployment/i-scheduler-extender-controller-manager
+kubectl -n i-scheduler-extender-system rollout status deployment/i-scheduler-extender-controller-manager --timeout=180s
 ```
 
-如果使用集成方式，还需要先从已有 kube-scheduler 配置中移除 `extenders`，再删除 Extender Service。
+镜像回滚时，继续使用 bootstrap 入口指定上一版兼容镜像，避免恢复没有启动旁路的历史 Pod 模板：
 
-## 10. 上线前检查
+```bash
+make deploy-bootstrap IMG=registry.example.com/platform/i-scheduler-extender:v1
+```
 
-- `kubectl top nodes` 正常；
-- `topNodesCount`、`minSchedulableNodes` 与节点总数匹配；
-- 已设置节点白名单，避免节点保护逻辑处理控制平面或特殊用途节点；
-- Extender ServiceAccount 可以读取 Metrics API；
-- 工作负载设置了内存 request 或 limit；
-- 已确认 `scheduler.example.com/memory-blocked` 标签由 Extender 管理，且 75% 恢复阈值符合预期；
-- 已确认 cordon 不会驱逐已有 Pod；
-- 已将 `cluster-admin` 替换为审核后的最小 RBAC；
-- 已验证 scheduler、Extender、Metrics API Server 之间的网络连通性；
-- 已准备参数、镜像和 scheduler 配置的回滚方案。
+卸载时先从默认 kube-scheduler 配置移除本项目的 `extenders`，触发静态 Pod 重建，确认默认调度器恢复原生调度。随后删除策略，等待 controller 清理其自动 cordon 并完成 finalizer，再删除 Operator：
+
+```bash
+kubectl delete schedulerpolicy cluster --timeout=120s
+make undeploy
+```
+
+策略删除若因节点清理失败而等待，检查 controller 日志和 CR 状态，保持 Operator 运行以便重试。`make undeploy` 会删除 CRD 等安装资源；先确认策略已完成清理。
+
+## 8. RBAC 与节点保护
+
+权限由 [config/rbac](../config/rbac) 管理，包括读取和更新 Node、读取 Pod、创建 `pods/binding`、读取 Metrics API、协调 SchedulerPolicy 及其 status，以及通过 Lease 进行 leader election。
+
+NodeBalancer 周期清理退出管理范围的自动 cordon，读取新鲜指标，先恢复负载回落的自动 cordon，再对受管可用节点的 Top N 高负载候选考虑新增 cordon。新增动作不得主动将可用节点减到 `minSchedulableNodes` 以下；不会驱逐已有 Pod，人工 cordon 保留。
+
+CR 的 Ready 反映策略协调结果，HTTP Ready 反映调度服务是否可接收请求。管理员接管自动 cordon、指标失败和可用节点计数规则见 [策略配置说明](NODEBALANCER-CONFIG.md)。

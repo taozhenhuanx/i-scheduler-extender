@@ -24,7 +24,7 @@
 
 Scheduler Extender 分数会与 kube-scheduler 的其他打分插件合并，因此这是节点偏好，不保证固定选择某个节点。可选的 `/filter_onlyone` 接口会选出最低负载对应的最高分节点；并列时按轮询分配。
 
-集群需要正常运行 Metrics Server（`kubectl top nodes` 有返回）。Extender ServiceAccount 需要读取 Metrics API、列出 Pods，并更新 Node 标签；集成部署清单包含这些权限。
+集群需要正常运行 Metrics Server（`kubectl top nodes` 有返回）。Extender ServiceAccount 需要读取 Metrics API、列出 Pods，并更新 Node 标签；Kubebuilder 的 `config/rbac` 包含这些权限。
 
 ## 配置、构建和部署
 
@@ -56,7 +56,7 @@ make deploy IMG=registry.example.com/platform/i-scheduler-extender:v1
 
 默认 kube-scheduler 已接入此 Extender 时，先根据实际节点修改 [bootstrap patch](config/bootstrap/manager_bootstrap_patch.yaml)，再使用 `make deploy-bootstrap IMG=...` 部署和升级。此入口通过 `nodeName` 保证 Operator 能在自身 HTTP 服务未启动时运行；当前服务器的示例节点为 `m1`，操作细节见 [启动旁路](deploy/DEPLOYMENT-STARTUP.md#单实例接管和启动旁路)。
 
-`make deploy` 部署 Kubebuilder manager 和 Extender Service。使用自定义 `kube-scheduler` 的组合部署仍可用 [deploy/manifest.yaml](deploy/manifest.yaml)。部署细节见 [部署文档](deploy/DEPLOYMENT-STARTUP.md) 和 [集成部署文档](deploy/DEPLOYMENT-INTEGRATED.md)。
+当前分支使用 Kubebuilder 的 `config/` 管理 Operator 部署资源，并将 Extender 接入集群已有的默认 kube-scheduler。部署、控制平面配置、升级和卸载步骤见 [部署文档](deploy/DEPLOYMENT-STARTUP.md)。
 
 Kubebuilder 部署的 Extender Service 地址为 `http://i-scheduler-extender-http.i-scheduler-extender-system.svc:8080`，可填入已有 kube-scheduler 的 extender `urlPrefix`。
 
@@ -101,6 +101,6 @@ kubectl -n i-scheduler-extender-system logs deployment/i-scheduler-extender-cont
   -c manager --since=10m --tail=100
 ```
 
-结合默认 scheduler 的 Extender 配置、调度事件和 Manager 的 `bound pod` 日志确认链路。独立 scheduler 组合部署仍需要设置 `schedulerName: i-scheduler-extender`，并查看 `kube-system` 中对应 Deployment 的日志。
+结合默认 scheduler 的 Extender 配置、调度事件和 Manager 的 `bound pod` 日志确认链路。
 
 查看 Filter/Prioritize HTTP 返回值、验证内存门槛而不分配大内存，以及 Pending 排查，见 [本机集群验证](deploy/SCHEDULING-LOGIC.md#6-在当前本机集群验证)。

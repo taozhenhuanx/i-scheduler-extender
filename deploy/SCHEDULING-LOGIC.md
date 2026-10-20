@@ -23,7 +23,7 @@ flowchart LR
 3. kube-scheduler 合并原生打分与 Extender 的实测负载分数，再选择节点。
 4. Extender 在 Bind 前重新读取 Pod 和节点，再检查内存门槛，登记过渡期预算，然后调用 Kubernetes Bind API。
 
-默认集成方式下，业务 Pod 省略 `schedulerName` 即使用 `default-scheduler`，不需要优先级节点标签。独立 scheduler 部署方式仍需要显式填写 `schedulerName: i-scheduler-extender`。Pod 显式指定其他 scheduler、填写 `nodeName`，或通过其他绑定路径运行时，需要按实际路径判断是否经过此 Extender。
+当前分支将 Extender 接入默认调度器，业务 Pod 省略 `schedulerName` 即使用 `default-scheduler`，不需要优先级节点标签。Pod 显式指定其他 scheduler、填写 `nodeName`，或通过其他绑定路径运行时，需要按实际路径判断是否经过此 Extender。
 
 仓库也提供可选的 `/filter_onlyone`：它先执行同样的内存过滤，再只返回 Extender 分数最高的一个节点，并列时轮询。**默认集成配置未启用这个接口**。使用 `/filter` 时，低负载是节点偏好，最终选择还受 kube-scheduler 其他分数影响。
 
@@ -182,7 +182,7 @@ Deployment 使用单副本 `Recreate`：先停止旧实例，再由新 leader �
 
 ## 6. 在当前本机集群验证
 
-以下命令按 Kubebuilder 默认集成部署名称编写。若本机使用其他 namespace、Deployment 或独立 scheduler，按实际配置替换。
+以下命令按当前 Kubebuilder 部署名称编写。若本机修改了 namespace 或 Deployment 名称，按实际配置替换。
 
 ### 6.1 确认镜像、策略和指标
 
