@@ -23,6 +23,7 @@
 - context：`kubernetes-admin@kubernetes`。
 - 节点：`m1`，Kubernetes `v1.22.9`，Docker `20.10.24`。
 - 默认 kube-scheduler 已配置 Extender Service，使用 `/filter`、`/prioritize`、`/bind`。业务 Pod 省略 `schedulerName` 即走这条路径。
+- 控制平面实际配置文件为 `/etc/kubernetes/scheduler-config.yaml`（默认 profile 与 Extender 地址、三个接口）和 `/etc/kubernetes/manifests/kube-scheduler.yaml`（`--config`、配置文件挂载、集群 DNS 与 `ndots: "1"`）。这些由部署操作修改，Operator 和 `SchedulerPolicy` 不会自动修改；完整字段见 [控制平面配置说明](DEPLOYMENT-STARTUP.md#控制平面需要修改的两份配置)。
 - 部署前旧 Operator 镜像为 `operator-test-live-usage`，Deployment 使用 RollingUpdate，没有 `nodeName` 启动旁路。本次已应用 `Recreate` 和 `nodeName: m1`。
 - 部署前旧 Operator 和业务 Pod 因 `node.kubernetes.io/disk-pressure:NoSchedule` 无法调度；Metrics Server 正常，`kubectl top nodes` 能返回指标。磁盘扩容后等待 kubelet 恢复节点状态，现已确认 `DiskPressure=False` 且对应 taint 自动移除；`nodeName` 旁路不能绕过 kubelet 的磁盘压力准入。
 - 部署前 `SchedulerPolicy/cluster` 的 `nodeSelector` 是临时验证留下的 `codex-deployment-test/no-match: "true"`，没有管理任何节点。本次已应用正常策略样例，实际 generation 为 `3`，`nodeSelector: {}` 已确认。

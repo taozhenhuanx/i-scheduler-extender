@@ -218,6 +218,38 @@ extenders:
 
 当前集群运行 Kubernetes 1.22.9，可使用 [`kube-scheduler-config-v1beta2.yaml`](kube-scheduler-config-v1beta2.yaml) 中的组件配置片段。将 `profiles` 和 `extenders` 合并到现有 `KubeSchedulerConfiguration`，不要覆盖控制平面原有的认证、leader election 等设置。kube-scheduler 为 hostNetwork Pod 时应使用 `dnsPolicy: ClusterFirstWithHostNet`，以便解析 Service DNS。
 
+### 控制平面需要修改的两份配置
+
+当前服务器采用 kubeadm 静态 Pod。接入默认调度器需要在控制平面节点修改以下两份文件：
+
+| 服务器文件 | 修改内容 |
+|---|---|
+| `/etc/kubernetes/scheduler-config.yaml` | 保留 `default-scheduler` profile，增加上述 `extenders`，让调度器调用 `/filter`、`/prioritize`、`/bind` |
+| `/etc/kubernetes/manifests/kube-scheduler.yaml` | 添加 `--config` 启动参数和配置文件挂载；设置集群 DNS 策略及下方的 `ndots: "1"` |
+
+在现有静态 Pod 清单中合并以下字段，保留其他启动参数和挂载。完整示例见 [kube-scheduler-static-pod.yaml](kube-scheduler-static-pod.yaml)：
+
+```yaml
+spec:
+  containers:
+    - name: kube-scheduler
+      command:
+        - kube-scheduler
+        # 合并到已有 command 列表，保留其他参数。
+        - --config=/etc/kubernetes/scheduler-config.yaml
+      volumeMounts:
+        - name: scheduler-config
+          mountPath: /etc/kubernetes/scheduler-config.yaml
+          readOnly: true
+  volumes:
+    - name: scheduler-config
+      hostPath:
+        path: /etc/kubernetes/scheduler-config.yaml
+        type: File
+```
+
+这是部署时对控制平面进行的配置操作。`make deploy`、`make deploy-bootstrap` 和 Operator 的 `SchedulerPolicy` CR 都不会自动修改这两份服务器文件；CR 管理权重、阈值和节点保护策略。接入完成后，省略 `schedulerName` 的业务 Pod 使用 `default-scheduler`，因此会经过 Extender。新集群也需要完成这一接入步骤。
+
 当前服务器的宿主机搜索域包含 `localdomain`。默认 `ndots:5` 会先展开 Extender 的 Service 域名，错误后缀查询可能被转发到不可达的外部 DNS，耗尽 Extender 请求超时。静态 Pod 示例使用以下设置，优先查询带点的完整域名：
 
 ```yaml
@@ -228,7 +260,9 @@ dnsConfig:
       value: "1"
 ```
 
-修改静态 Pod 清单前备份原文件；kubelet 会自动重建调度器，期间新调度会短暂停顿，已有业务容器继续运行。重建后检查容器实际 `resolv.conf`，确认集群 DNS 地址及 `ndots:1` 生效。
+修改前备份两份文件，将静态 Pod 的备份放在 `/etc/kubernetes/manifests` 之外。修改静态 Pod 清单的实际内容后，kubelet 会自动重建调度器，期间新调度会短暂停顿，已有业务容器继续运行。**仅修改挂载的 `scheduler-config.yaml` 不会触发重建，kube-scheduler 也不会自动重新加载该配置**；后续单独更新它时，还需要修改静态 Pod 的配置版本 annotation 等内容，触发重建。仅删除 API 中的镜像 Pod 不会重启静态 Pod 容器。
+
+重建后检查容器实际 `resolv.conf`，确认集群 DNS 地址及 `ndots:1` 生效，并结合调度器日志和 Extender 的 `bound pod` 日志确认接入。当前服务器的实际改动和验证结果见 [本次部署记录](DEPLOYMENT-20261020.md)。
 
 ### 集成方式 RBAC
 

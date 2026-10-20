@@ -220,7 +220,9 @@ extenders:
 
 ### 4.3 让 kube-scheduler 重新加载配置
 
-如果是 kubeadm 静态 Pod，保存配置后 kubelet 通常会自动重建 kube-scheduler。可以观察：
+如果是 kubeadm 静态 Pod，需要让 `--config` 指向调度配置，并通过 `hostPath` 将文件挂进容器。控制平面两份文件的路径、挂载和 DNS 设置见 [控制平面需要修改的两份配置](DEPLOYMENT-STARTUP.md#控制平面需要修改的两份配置)。这些文件由部署操作配置，Operator 和 `SchedulerPolicy` 不会自动修改它们。
+
+仅保存挂载的调度配置文件不会触发 kubelet 重建，kube-scheduler 也不会自动重新加载。修改静态 Pod 清单的实际内容（例如更新配置版本 annotation）后，kubelet 才会重建调度器并加载新配置。备份文件应放在 `/etc/kubernetes/manifests` 之外；仅删除 API 中的镜像 Pod 不会重启静态 Pod 容器。可以观察：
 
 ```bash
 kubectl -n kube-system get pod -l component=kube-scheduler -w
