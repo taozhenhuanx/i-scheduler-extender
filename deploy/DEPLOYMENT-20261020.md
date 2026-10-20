@@ -123,4 +123,34 @@ kubectl get nodes -L scheduler.example.com/memory-blocked
 
 根目录原先约 49GB、使用率 95%。已清理之前工作产生的四份可再生 Go 编译缓存，空闲增加到约 7.3GB、使用率约 86%；Kubernetes 磁盘压力状态有恢复等待时间，应再次查询确认。
 
-用户新增的 100GiB 磁盘已识别为 `/dev/sdb`，检查无分区和文件系统签名。用户已同意将它加入 `centos` LVM 并在线扩根 XFS；实施结果另行记录。扩容后根文件系统跨两块磁盘，两块磁盘均需保留。不要仅手工删除磁盘压力 taint，应让 kubelet 根据实际空间自行恢复。
+用户新增的 100GiB 磁盘已识别为 `/dev/sdb`，检查无分区和文件系统签名。用户已同意将它加入 `centos` LVM 并在线扩根 XFS。备份命令等待审批后中断，无法确认备份成功；`pvcreate`、`vgextend`、`lvextend`、`xfs_growfs` 均未执行，根目录仍约 49GB。扩容后根文件系统跨两块磁盘，两块磁盘均需保留。不要仅手工删除磁盘压力 taint，应让 kubelet 根据实际空间自行恢复。
+
+在服务器以 root 执行前，再确认 `/dev/sdb` 仍为空盘；`wipefs --no-act` 应没有输出：
+
+```bash
+lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL
+wipefs --no-act /dev/sdb
+```
+
+确认无签名后按顺序执行，每一步成功再继续。下列命令会初始化 `/dev/sdb`，根 XFS 扩容后不能缩小：
+
+```bash
+mkdir -p /data/scheduler/storage-expansion-20261020
+vgcfgbackup --file /data/scheduler/storage-expansion-20261020/centos-before.vg centos
+pvcreate /dev/sdb
+vgextend centos /dev/sdb
+lvextend -l +100%FREE /dev/centos/root
+xfs_growfs /
+df -hT /
+pvs
+vgs
+lvs -o lv_name,vg_name,lv_size,devices
+```
+
+预期根目录扩到约 149GiB，随后等待 kubelet 的磁盘压力状态恢复：
+
+```bash
+kubectl get node m1 -o jsonpath='{.spec.taints}{"\n"}{range .status.conditions[?(@.type=="DiskPressure")]}{.status}{"\n"}{end}'
+```
+
+默认磁盘压力状态恢复有等待时间。普通业务测试应等 `DiskPressure=False` 且对应 taint 自动移除后再执行。
