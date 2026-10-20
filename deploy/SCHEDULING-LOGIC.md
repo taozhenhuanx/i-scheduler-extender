@@ -202,6 +202,15 @@ kubectl get nodes -L scheduler.example.com/memory-blocked
 
 ### 6.2 一个小 Pod 检查真实调度链路
 
+当前单节点 `m1` 已缓存 `mirror.gcr.io/library/alpine:3`，而 Docker Hub 拉取 BusyBox 超时。可直接使用仓库中的 [本机缓存镜像验证清单](scheduler-extender-check-local.yaml)：
+
+```bash
+kubectl apply -f deploy/scheduler-extender-check-local.yaml
+kubectl get pod scheduler-extender-check -o wide
+```
+
+该清单使用 `imagePullPolicy: Never`，只适用于已缓存此镜像的节点；在其他集群先准备镜像，或使用下面的通用清单。它省略 `schedulerName` 和 `nodeName`，保留真实调度路径。检查及清理步骤见下方。
+
 保存为 `scheduler-extender-check.yaml` 并应用：
 
 ```yaml

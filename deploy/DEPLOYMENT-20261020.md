@@ -161,6 +161,15 @@ bound pod: default/test-7c6d664cf4-86nbj to node:m1
 
 该 Pod 已完成调度和 Extender Bind，但 Docker Hub 拉取 `busybox:1.36` 超时，随后显示 `ImagePullBackOff`。容器尚未进入 Running；这是镜像下载问题，过渡期内存预算仍保留，不能据此判断调度失败。
 
+尝试从 `mirror.gcr.io` 拉取同版本 BusyBox 也超时。当前 `m1` 已确认缓存 `mirror.gcr.io/library/alpine:3`，已提供 [本机验证清单](scheduler-extender-check-local.yaml)，使用 `imagePullPolicy: Never`，方便用户自行验证而不依赖镜像下载：
+
+```bash
+kubectl apply -f deploy/scheduler-extender-check-local.yaml
+kubectl get pod scheduler-extender-check -o wide
+kubectl -n i-scheduler-extender-system logs \
+  deployment/i-scheduler-extender-controller-manager -c manager --since=5m --tail=100
+```
+
 随后可按 [小 Pod 验证](SCHEDULING-LOGIC.md#62-一个小-pod-检查真实调度链路) 在本机继续试效果，通过 Manager 的 `bound pod` 日志确认实际 Bind。该服务器当前只有一个节点，无法比较多节点负载分配。
 
 ## 磁盘处理
