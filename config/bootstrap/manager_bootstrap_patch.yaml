@@ -1,0 +1,10 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: i-scheduler-extender-controller-manager
+spec:
+  template:
+    spec:
+      # m1 是当前服务器的节点名；部署到其他集群前必须改为实际可用节点。
+      # nodeName 由 kubelet 直接接管，不经过 kube-scheduler 或其全局 extenders。
+      nodeName: m1

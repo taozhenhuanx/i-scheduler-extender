@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,11 +48,7 @@ type Extender struct {
 // SetWeights updates the CPU and memory scoring weights applied to new requests.
 // SetWeights 在线更新 CPU 与内存评分权重；并发评分通过读写锁读取一致的权重。
 func (ex *Extender) SetWeights(cpuWeight, memoryWeight float64) error {
-	cpuWeight, memoryWeight, err := nodeusage.ParseWeights(
-		strconv.FormatFloat(cpuWeight, 'f', -1, 64),
-		strconv.FormatFloat(memoryWeight, 'f', -1, 64),
-	)
-	if err != nil {
+	if err := nodeusage.ValidateWeights(cpuWeight, memoryWeight); err != nil {
 		return err
 	}
 	ex.weightsMu.Lock()

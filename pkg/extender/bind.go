@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/lixd96/i-scheduler-extender/pkg/nodeusage"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
@@ -26,7 +28,6 @@ func (ex *Extender) BindWithContext(ctx context.Context, args extenderv1.Extende
 	ex.admissionMu.Lock()
 	defer ex.admissionMu.Unlock()
 
-	log.Printf("bind pod: %s/%s to node:%s", args.PodNamespace, args.PodName, args.Node)
 	if ex.ClientSet == nil {
 		result.Error = "Kubernetes client is unavailable"
 		return result
@@ -47,6 +48,10 @@ func (ex *Extender) BindWithContext(ctx context.Context, args extenderv1.Extende
 		result.Error = fmt.Sprintf("pod %s/%s is already assigned to node %q", args.PodNamespace, args.PodName, pod.Spec.NodeName)
 		return result
 	}
+	if reservedNode := ex.pendingPodNode(pod); reservedNode != "" && reservedNode != args.Node {
+		result.Error = fmt.Sprintf("pod %s/%s has an unresolved binding to node %q; retry that node or recreate the Pod", args.PodNamespace, args.PodName, reservedNode)
+		return result
+	}
 	podMemory := nodeusage.PodMemoryReservationBytes(*pod)
 	if podMemory <= 0 {
 		result.Error = "pod must set a memory request or limit for the 80% node memory guard"
@@ -61,6 +66,10 @@ func (ex *Extender) BindWithContext(ctx context.Context, args extenderv1.Extende
 	metric, ok := metricsByNode[args.Node]
 	if !ok {
 		result.Error = fmt.Sprintf("memory metrics are unavailable for node %q", args.Node)
+		return result
+	}
+	if _, err := memorySampleStart(metric, time.Now()); err != nil {
+		result.Error = fmt.Sprintf("invalid memory metrics for node %q: %v", args.Node, err)
 		return result
 	}
 	memoryUsed, err := nodeusage.MemoryUsageBytes(metric)
@@ -78,12 +87,13 @@ func (ex *Extender) BindWithContext(ctx context.Context, args extenderv1.Extende
 		result.Error = fmt.Sprintf("cannot read memory capacity for node %q: %v", args.Node, err)
 		return result
 	}
-	pendingByNode, err := ex.pendingMemoryByNode(ctx)
+	pendingByNode, err := ex.pendingMemoryByNode(ctx, metricsByNode)
 	if err != nil {
 		result.Error = fmt.Sprintf("cannot read pending memory reservations before binding: %v", err)
 		return result
 	}
-	memoryUsed += pendingByNode[args.Node]
+	ownReservation := ex.ownPendingMemory(pod, args.Node)
+	memoryUsed += pendingByNode[args.Node] - ownReservation
 	currentPercent := memoryPercent(memoryUsed, memoryCapacity)
 	projectedPercent := memoryPercent(memoryUsed+podMemory, memoryCapacity)
 
@@ -104,15 +114,21 @@ func (ex *Extender) BindWithContext(ctx context.Context, args extenderv1.Extende
 		}
 	}
 
-	ex.reservePodMemory(args.PodNamespace, args.PodName, args.Node, podMemory)
+	ex.reservePodMemory(pod, args.Node, podMemory)
 	binding := &corev1.Binding{
-		ObjectMeta: metav1.ObjectMeta{Name: args.PodName, Namespace: args.PodNamespace, UID: args.PodUID},
+		ObjectMeta: metav1.ObjectMeta{Name: args.PodName, Namespace: args.PodNamespace, UID: pod.UID},
 		Target:     corev1.ObjectReference{Kind: "Node", APIVersion: "v1", Name: args.Node},
 	}
 	if err := ex.ClientSet.CoreV1().Pods(args.PodNamespace).Bind(ctx, binding, metav1.CreateOptions{}); err != nil {
-		ex.releasePodMemory(args.PodNamespace, args.PodName)
+		// 超时或断连不能证明 API Server 没有完成绑定，保留预算供重试或新采样接替。
+		// Conflict 也可能是此前超时的 Bind 已完成；重试前已有预约时同样不盲目清账。
+		if ownReservation == 0 && (apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) || apierrors.IsNotFound(err)) {
+			ex.releasePodMemory(pod)
+		}
 		klog.ErrorS(err, "Failed to bind pod", "pod", args.PodName, "namespace", args.PodNamespace, "podUID", args.PodUID, "node", args.Node)
 		result.Error = err.Error()
+	} else {
+		log.Printf("bound pod: %s/%s to node:%s", args.PodNamespace, args.PodName, args.Node)
 	}
 	return result
 }

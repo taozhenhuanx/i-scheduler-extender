@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"strconv"
 	"time"
 
 	schedulerv1alpha1 "github.com/lixd96/i-scheduler-extender/api/v1alpha1"
@@ -45,10 +44,19 @@ type SchedulerPolicyReconciler struct {
 	KubernetesClient kubernetes.Interface
 	DynamicClient    dynamic.Interface
 	Extender         *extender.Extender
+	// StartupReady 在 Extender 初始化策略和内存预留后关闭，避免启动加载覆盖首次协调的新权重。
+	StartupReady <-chan struct{}
 }
 
 // Reconcile 校验单例资源，处理删除清理，应用策略后更新 Ready 状态并安排下一轮检查。
 func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request reconcile.Request) (ctrl.Result, error) {
+	if r.StartupReady != nil {
+		select {
+		case <-r.StartupReady:
+		case <-ctx.Done():
+			return ctrl.Result{}, ctx.Err()
+		}
+	}
 	if request.Name != clusterPolicyName {
 		unsupportedPolicy := &schedulerv1alpha1.SchedulerPolicy{}
 		if err := r.Get(ctx, types.NamespacedName{Name: request.Name}, unsupportedPolicy); err != nil {
@@ -79,8 +87,7 @@ func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request recon
 			); err != nil {
 				return ctrl.Result{}, fmt.Errorf("reset Extender weights: %w", err)
 			}
-			controllerutil.RemoveFinalizer(policy, cleanupFinalizer)
-			if err := r.Update(ctx, policy); err != nil {
+			if err := r.patchCleanupFinalizer(ctx, policy, false); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove policy cleanup finalizer: %w", err)
 			}
 		}
@@ -88,8 +95,7 @@ func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request recon
 	}
 	if !controllerutil.ContainsFinalizer(policy, cleanupFinalizer) {
 		// 先登记 finalizer，确保资源删除时有机会执行节点恢复和权重清理。
-		controllerutil.AddFinalizer(policy, cleanupFinalizer)
-		if err := r.Update(ctx, policy); err != nil {
+		if err := r.patchCleanupFinalizer(ctx, policy, true); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add policy cleanup finalizer: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -121,6 +127,19 @@ func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request recon
 	return ctrl.Result{RequeueAfter: config.CheckInterval}, nil
 }
 
+// patchCleanupFinalizer 只补丁更新 metadata，并用 resourceVersion 防止覆盖并发修改。
+// 避免整对象 Update 重新序列化 spec，使显式零权重和未知字段保持原值。
+func (r *SchedulerPolicyReconciler) patchCleanupFinalizer(ctx context.Context, policy *schedulerv1alpha1.SchedulerPolicy, add bool) error {
+	base := policy.DeepCopy()
+	updated := policy.DeepCopy()
+	if add {
+		controllerutil.AddFinalizer(updated, cleanupFinalizer)
+	} else {
+		controllerutil.RemoveFinalizer(updated, cleanupFinalizer)
+	}
+	return r.Patch(ctx, updated, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+}
+
 // setReadyCondition 只在状态变化时写回 status，避免重复更新产生无意义事件。
 func (r *SchedulerPolicyReconciler) setReadyCondition(
 	ctx context.Context,
@@ -147,8 +166,9 @@ func (r *SchedulerPolicyReconciler) setReadyCondition(
 
 // balancerConfig 将 CR 字段转换成运行时配置，并校验需要联合判断的策略约束。
 func balancerConfig(spec schedulerv1alpha1.SchedulerPolicySpec) (rebalancer.Config, float64, float64, error) {
-	if spec.CPUWeight+spec.MemoryWeight != 100 {
-		return rebalancer.Config{}, 0, 0, fmt.Errorf("cpuWeight and memoryWeight must sum to 100")
+	cpuWeight, memoryWeight, err := spec.ResolveWeights()
+	if err != nil {
+		return rebalancer.Config{}, 0, 0, err
 	}
 	if spec.HighThreshold < 5 || spec.HighThreshold > 100 {
 		return rebalancer.Config{}, 0, 0, fmt.Errorf("highThreshold must be between 5 and 100")
@@ -166,15 +186,15 @@ func balancerConfig(spec schedulerv1alpha1.SchedulerPolicySpec) (rebalancer.Conf
 	}
 	return rebalancer.Config{
 		CheckInterval:       time.Duration(spec.CheckIntervalSeconds) * time.Second,
-		CPUWeight:           strconv.FormatInt(int64(spec.CPUWeight), 10),
-		MemoryWeight:        strconv.FormatInt(int64(spec.MemoryWeight), 10),
+		CPUWeight:           cpuWeight,
+		MemoryWeight:        memoryWeight,
 		NodeSelector:        spec.NodeSelector,
 		IgnoreNodes:         ignored,
 		HighThreshold:       float64(spec.HighThreshold),
 		RecoveryThreshold:   recoveryThreshold,
 		MinSchedulableNodes: int(spec.MinSchedulableNodes),
 		TopNodesCount:       int(spec.TopNodesCount),
-	}, float64(spec.CPUWeight) / 100, float64(spec.MemoryWeight) / 100, nil
+	}, cpuWeight, memoryWeight, nil
 }
 
 // SetupWithManager 监听策略和 Node 变化；节点变化时重新排队协调集群级单例策略。

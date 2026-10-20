@@ -3,6 +3,7 @@ package extender
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/lixd96/i-scheduler-extender/pkg/nodeusage"
 	v1 "k8s.io/api/core/v1"
@@ -43,17 +44,25 @@ func (ex *Extender) FilterWithContext(ctx context.Context, args extenderv1.Exten
 	if err != nil {
 		return &extenderv1.ExtenderFilterResult{Error: fmt.Sprintf("cannot read node memory metrics: %v", err)}
 	}
-	pendingByNode, err := ex.pendingMemoryByNode(ctx)
+	pendingByNode, err := ex.pendingMemoryByNode(ctx, metricsByNode)
 	if err != nil {
 		return &extenderv1.ExtenderFilterResult{Error: fmt.Sprintf("cannot read Pod assignment snapshot: %v", err)}
 	}
 
 	nodes := make([]v1.Node, 0, len(args.Nodes.Items))
 	nodeNames := make([]string, 0, len(args.Nodes.Items))
+	reservedNode := ex.pendingPodNode(args.Pod)
 	for _, node := range args.Nodes.Items {
+		if reservedNode != "" && reservedNode != node.Name {
+			continue
+		}
 		metric, ok := metricsByNode[node.Name]
 		if !ok {
 			klog.V(4).Infof("[Filter] metrics missing for node %q; excluding it from memory-safe candidates", node.Name)
+			continue
+		}
+		if _, err := memorySampleStart(metric, time.Now()); err != nil {
+			klog.Warningf("[Filter] excluding node %q with invalid memory sample: %v", node.Name, err)
 			continue
 		}
 		memoryUsed, err := nodeusage.MemoryUsageBytes(metric)
@@ -67,7 +76,7 @@ func (ex *Extender) FilterWithContext(ctx context.Context, args extenderv1.Exten
 			continue
 		}
 
-		memoryUsed += pendingByNode[node.Name]
+		memoryUsed += pendingByNode[node.Name] - ex.ownPendingMemory(args.Pod, node.Name)
 		projectedMemory := memoryUsed + podMemory
 		currentPercent := memoryPercent(memoryUsed, memoryCapacity)
 		projectedPercent := memoryPercent(projectedMemory, memoryCapacity)

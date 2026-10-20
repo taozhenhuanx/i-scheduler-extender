@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/lixd96/i-scheduler-extender/pkg/nodeusage"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -17,7 +19,9 @@ const (
 	memoryBlockThresholdPercent = 80.0
 	memoryRecoveryPercent       = 75.0
 	podMemoryCacheTTL           = time.Second
-	pendingMemoryReservationTTL = 10 * time.Minute
+	// 指标超过两分钟或明显来自未来时停止准入，不能用旧样本释放预留。
+	memorySampleMaxAge = 2 * time.Minute
+	memoryClockSkew    = 10 * time.Second
 )
 
 type memoryGuardDecision uint8
@@ -44,17 +48,83 @@ func decideMemoryGuard(currentPercent, projectedPercent float64, isBlocked bool)
 }
 
 type podMemorySnapshot struct {
-	nodeByPod map[string]string
+	pods       map[string]*corev1.Pod
+	observedAt time.Time
 }
 
 type pendingMemoryReservation struct {
+	podKey    string
+	podUID    types.UID
 	nodeName  string
 	bytes     int64
 	createdAt time.Time
 }
 
-// pendingMemoryByNode 汇总正在 Bind 的 Pod 临时预算；已运行 Pod 的占用以 Metrics API 实测值为准。
-func (ex *Extender) pendingMemoryByNode(ctx context.Context) (map[string]int64, error) {
+// memorySampleStart 返回采样窗口起点。整个窗口都晚于容器启动，才能确认实测值已接替预算。
+func memorySampleStart(metric map[string]interface{}, now time.Time) (time.Time, error) {
+	timestamp, ok := metric["timestamp"].(string)
+	if !ok {
+		return time.Time{}, fmt.Errorf("missing metrics timestamp")
+	}
+	sampledAt, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid metrics timestamp: %w", err)
+	}
+	if sampledAt.After(now.Add(memoryClockSkew)) || now.Sub(sampledAt) > memorySampleMaxAge {
+		return time.Time{}, fmt.Errorf("metrics timestamp %s is stale or in the future", timestamp)
+	}
+	window, ok := metric["window"].(string)
+	if !ok {
+		return time.Time{}, fmt.Errorf("missing metrics window")
+	}
+	duration, err := time.ParseDuration(window)
+	if err != nil || duration <= 0 || duration > memorySampleMaxAge {
+		return time.Time{}, fmt.Errorf("invalid metrics window %q", window)
+	}
+	// 时钟偏差只用于接受样本，不允许未来样本提前覆盖尚未发生的容器启动。
+	if sampledAt.After(now) {
+		sampledAt = now
+	}
+	return sampledAt.Add(-duration), nil
+}
+
+func terminalPod(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
+}
+
+// podMemoryCovered 要求所有应用容器和可重启 init 容器均已运行且被完整采样窗口覆盖。
+// 镜像拉取、普通 init 执行及容器重启等待期间继续计入预算；nodeName 本身不能证明覆盖。
+func podMemoryCovered(pod *corev1.Pod, metric map[string]interface{}, now time.Time) bool {
+	start, err := memorySampleStart(metric, now)
+	if err != nil || len(pod.Spec.Containers) == 0 {
+		return false
+	}
+	covered := func(name string, statuses []corev1.ContainerStatus) bool {
+		for _, status := range statuses {
+			if status.Name == name {
+				running := status.State.Running
+				return running != nil && !running.StartedAt.IsZero() && !running.StartedAt.Time.After(start)
+			}
+		}
+		return false
+	}
+	for _, container := range pod.Spec.Containers {
+		if !covered(container.Name, pod.Status.ContainerStatuses) {
+			return false
+		}
+	}
+	for _, container := range pod.Spec.InitContainers {
+		if container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			if !covered(container.Name, pod.Status.InitContainerStatuses) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// pendingMemoryByNode 汇总尚未被新指标覆盖的预算。没有固定 TTL，防止拉取镜像时间较长时漏算。
+func (ex *Extender) pendingMemoryByNode(ctx context.Context, metricsByNode map[string]map[string]interface{}) (map[string]int64, error) {
 	snapshot, err := ex.podMemorySnapshot(ctx)
 	if err != nil {
 		return nil, err
@@ -65,11 +135,13 @@ func (ex *Extender) pendingMemoryByNode(ctx context.Context) (map[string]int64, 
 	ex.pendingMemMu.Lock()
 	defer ex.pendingMemMu.Unlock()
 	for key, reservation := range ex.pendingMemory {
-		if now.Sub(reservation.createdAt) > pendingMemoryReservationTTL {
+		pod, seen := snapshot.pods[reservation.podKey]
+		// 缓存早于 Bind 预约时不能据此判定 Pod 已删除或同名替换。
+		if !snapshot.observedAt.Before(reservation.createdAt) && (!seen || pod.UID != reservation.podUID || terminalPod(pod) || (pod.Spec.NodeName != "" && pod.Spec.NodeName != reservation.nodeName)) {
 			delete(ex.pendingMemory, key)
 			continue
 		}
-		if nodeName, seen := snapshot.nodeByPod[key]; seen && nodeName != "" {
+		if seen && pod.UID == reservation.podUID && pod.Spec.NodeName == reservation.nodeName && podMemoryCovered(pod, metricsByNode[reservation.nodeName], now) {
 			delete(ex.pendingMemory, key)
 			continue
 		}
@@ -78,7 +150,7 @@ func (ex *Extender) pendingMemoryByNode(ctx context.Context) (map[string]int64, 
 	return pending, nil
 }
 
-// podMemorySnapshot 缓存 Pod 所属节点，用于确认 Bind 临时预留何时已被实测内存接替。
+// podMemorySnapshot 缓存 Pod UID 和容器运行状态，用于判断预算是否可释放。
 func (ex *Extender) podMemorySnapshot(ctx context.Context) (*podMemorySnapshot, error) {
 	ex.podMemoryMu.Lock()
 	defer ex.podMemoryMu.Unlock()
@@ -88,16 +160,19 @@ func (ex *Extender) podMemorySnapshot(ctx context.Context) (*podMemorySnapshot, 
 	if ex.ClientSet == nil {
 		return nil, fmt.Errorf("Kubernetes client is unavailable")
 	}
+	observedAt := time.Now()
 	pods, err := ex.ClientSet.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
 	snapshot := &podMemorySnapshot{
-		nodeByPod: make(map[string]string, len(pods.Items)),
+		pods:       make(map[string]*corev1.Pod, len(pods.Items)),
+		observedAt: observedAt,
 	}
-	for _, pod := range pods.Items {
+	for i := range pods.Items {
+		pod := &pods.Items[i]
 		key := podMemoryKey(pod.Namespace, pod.Name)
-		snapshot.nodeByPod[key] = pod.Spec.NodeName
+		snapshot.pods[key] = pod
 	}
 	ex.podMemory = snapshot
 	ex.podMemoryAt = time.Now()
@@ -105,24 +180,73 @@ func (ex *Extender) podMemorySnapshot(ctx context.Context) (*podMemorySnapshot, 
 }
 
 // reservePodMemory 在调用 Kubernetes Bind 前登记预算，供后续准入检查立即计入。
-func (ex *Extender) reservePodMemory(namespace, name, nodeName string, bytes int64) {
+func (ex *Extender) reservePodMemory(pod *corev1.Pod, nodeName string, bytes int64) {
 	ex.pendingMemMu.Lock()
 	defer ex.pendingMemMu.Unlock()
 	if ex.pendingMemory == nil {
 		ex.pendingMemory = make(map[string]pendingMemoryReservation)
 	}
-	ex.pendingMemory[podMemoryKey(namespace, name)] = pendingMemoryReservation{
+	ex.pendingMemory[podReservationKey(pod)] = pendingMemoryReservation{
+		podKey:    podMemoryKey(pod.Namespace, pod.Name),
+		podUID:    pod.UID,
 		nodeName:  nodeName,
 		bytes:     bytes,
 		createdAt: time.Now(),
 	}
 }
 
-// releasePodMemory 在 Bind 失败时撤销临时预约，避免后续调度一直重复占用这部分预算。
-func (ex *Extender) releasePodMemory(namespace, name string) {
+// releasePodMemory 在 Bind 明确被拒绝时撤销新预约；结果不确定时等待 API 状态或新采样。
+func (ex *Extender) releasePodMemory(pod *corev1.Pod) {
 	ex.pendingMemMu.Lock()
 	defer ex.pendingMemMu.Unlock()
-	delete(ex.pendingMemory, podMemoryKey(namespace, name))
+	delete(ex.pendingMemory, podReservationKey(pod))
+}
+
+func podReservationKey(pod *corev1.Pod) string {
+	return podMemoryKey(pod.Namespace, pod.Name) + "/" + string(pod.UID)
+}
+
+// ownPendingMemory 在同一个 Pod 重试准入时扣除其旧预约，避免重复加上新 Pod 预算。
+func (ex *Extender) ownPendingMemory(pod *corev1.Pod, nodeName string) int64 {
+	ex.pendingMemMu.Lock()
+	defer ex.pendingMemMu.Unlock()
+	reservation := ex.pendingMemory[podReservationKey(pod)]
+	if reservation.nodeName == nodeName {
+		return reservation.bytes
+	}
+	return 0
+}
+
+// pendingPodNode 防止结果不确定的 Bind 重试改写旧节点预算。确认绑定状态前只能重试原节点。
+func (ex *Extender) pendingPodNode(pod *corev1.Pod) string {
+	ex.pendingMemMu.Lock()
+	defer ex.pendingMemMu.Unlock()
+	return ex.pendingMemory[podReservationKey(pod)].nodeName
+}
+
+// InitializeMemoryReservations 在 leader 开放调度接口前，从 API 重建启动和采样过渡期的预算。
+// 已被实测覆盖的稳定 Pod 不计入 request 总账；升级后尚未启动的已绑定 Pod 仍受保护。
+func (ex *Extender) InitializeMemoryReservations(ctx context.Context) error {
+	ex.admissionMu.Lock()
+	defer ex.admissionMu.Unlock()
+	metrics, err := ex.nodeMetrics(ctx)
+	if err != nil {
+		return fmt.Errorf("load node metrics for memory reservations: %w", err)
+	}
+	snapshot, err := ex.podMemorySnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("load Pods for memory reservations: %w", err)
+	}
+	now := time.Now()
+	for _, pod := range snapshot.pods {
+		if pod.Spec.NodeName == "" || terminalPod(pod) || podMemoryCovered(pod, metrics[pod.Spec.NodeName], now) {
+			continue
+		}
+		if budget := nodeusage.PodMemoryReservationBytes(*pod); budget > 0 {
+			ex.reservePodMemory(pod, pod.Spec.NodeName, budget)
+		}
+	}
+	return nil
 }
 
 func podMemoryKey(namespace, name string) string {

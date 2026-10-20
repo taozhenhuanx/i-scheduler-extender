@@ -67,6 +67,7 @@ spec:
                 description: |-
                   CPUWeight is the percentage of the scoring weight assigned to CPU utilization.
                   CPUWeight 是评分中分配给 CPU 使用率的权重百分比，须与 MemoryWeight 之和为 100。
+                  可显式设置为 0；未设置时使用默认百分比。
                 format: int32
                 maximum: 100
                 minimum: 0

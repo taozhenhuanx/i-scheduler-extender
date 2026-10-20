@@ -6,6 +6,8 @@ Copyright 2026.
 package v1alpha1
 
 import (
+	"fmt"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -47,14 +49,15 @@ type SchedulerPolicySpec struct {
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
-	CPUWeight int32 `json:"cpuWeight,omitempty"`
+	// 可显式设置为 0；未设置时使用默认百分比。
+	CPUWeight *int32 `json:"cpuWeight,omitempty"`
 
 	// MemoryWeight is the percentage of the scoring weight assigned to memory utilization.
 	// MemoryWeight 是评分中分配给内存使用率的权重百分比，须与 CPUWeight 之和为 100。
 	// +kubebuilder:default=90
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
-	MemoryWeight int32 `json:"memoryWeight,omitempty"`
+	MemoryWeight *int32 `json:"memoryWeight,omitempty"`
 
 	// HighThreshold is the weighted utilization percentage at which a node can be cordoned.
 	// HighThreshold 是节点允许被 cordon（标记为不可调度）的加权负载阈值。
@@ -91,6 +94,25 @@ type SchedulerPolicySpec struct {
 	// IgnoreNodes 按节点名称排除节点；被列出的节点不受本策略管理。
 	// +kubebuilder:validation:Optional
 	IgnoreNodes []string `json:"ignoreNodes,omitempty"`
+}
+
+// ResolveWeights 应用缺省百分比并校验权重总和，只在 API 边界转换为运行时的 0..1 比例。
+// 保留运行时跨字段校验，以兼容不支持 CEL schema 规则的 Kubernetes 1.22。
+func (spec SchedulerPolicySpec) ResolveWeights() (float64, float64, error) {
+	cpu, memory := DefaultCPUWeightPercent, DefaultMemoryWeightPercent
+	if spec.CPUWeight != nil {
+		cpu = *spec.CPUWeight
+	}
+	if spec.MemoryWeight != nil {
+		memory = *spec.MemoryWeight
+	}
+	if cpu < 0 || cpu > 100 || memory < 0 || memory > 100 {
+		return 0, 0, fmt.Errorf("cpuWeight and memoryWeight must each be between 0 and 100")
+	}
+	if cpu+memory != 100 {
+		return 0, 0, fmt.Errorf("cpuWeight and memoryWeight must sum to 100")
+	}
+	return float64(cpu) / 100, float64(memory) / 100, nil
 }
 
 // SchedulerPolicyStatus reports whether the latest policy was applied successfully.

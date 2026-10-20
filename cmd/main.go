@@ -4,9 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
-	"time"
 
 	schedulerv1alpha1 "github.com/lixd96/i-scheduler-extender/api/v1alpha1"
 	"github.com/lixd96/i-scheduler-extender/internal/controller"
@@ -22,7 +20,6 @@ import (
 	"k8s.io/klog/v2/klogr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	// +kubebuilder:scaffold:imports
 )
@@ -92,18 +89,34 @@ func run(configFile string) error {
 		return fmt.Errorf("create controller manager: %w", err)
 	}
 
+	// 首次权重加载与后续协调串行衔接，避免启动时的旧读结果覆盖新的策略。
+	startupReady := make(chan struct{})
 	reconciler := &controller.SchedulerPolicyReconciler{
 		Client:           mgr.GetClient(),
 		KubernetesClient: clientset,
 		DynamicClient:    dynamicClient,
 		Extender:         operatorExtender,
+		StartupReady:     startupReady,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up scheduler policy controller: %w", err)
 	}
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		return serveExtender(ctx, appSettings.ExtenderBindAddress, server.NewHandler(operatorExtender).Routes())
-	})); err != nil {
+	// 服务仅在 leader 上监听；先读取现有策略、恢复内存预留，再允许 readiness 通过。
+	extenderServer := newExtenderHTTPServer(
+		appSettings.ExtenderBindAddress,
+		server.NewHandler(operatorExtender).Routes(),
+		func(ctx context.Context) error {
+			if err := initializePolicyWeights(ctx, mgr.GetAPIReader(), operatorExtender); err != nil {
+				return err
+			}
+			if err := operatorExtender.InitializeMemoryReservations(ctx); err != nil {
+				return err
+			}
+			close(startupReady)
+			return nil
+		},
+	)
+	if err := mgr.Add(extenderServer); err != nil {
 		return fmt.Errorf("add scheduler extender HTTP server: %w", err)
 	}
 	// +kubebuilder:scaffold:builder
@@ -111,40 +124,9 @@ func run(configFile string) error {
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("add health check: %w", err)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("extender", extenderServer.Ready); err != nil {
 		return fmt.Errorf("add readiness check: %w", err)
 	}
 
 	return mgr.Start(ctrl.SetupSignalHandler())
-}
-
-// serveExtender 在 manager 生命周期内提供调度扩展接口，并在收到退出信号时优雅关闭。
-func serveExtender(ctx context.Context, address string, handler http.Handler) error {
-	httpServer := &http.Server{
-		Addr:              address,
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	serverError := make(chan error, 1)
-	go func() {
-		serverError <- httpServer.ListenAndServe()
-	}()
-
-	select {
-	case err := <-serverError:
-		if err == http.ErrServerClosed {
-			return nil
-		}
-		return err
-	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := httpServer.Shutdown(shutdownContext); err != nil {
-			return err
-		}
-		if err := <-serverError; err != nil && err != http.ErrServerClosed {
-			return err
-		}
-		return nil
-	}
 }

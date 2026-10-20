@@ -33,6 +33,16 @@ func (in *SchedulerPolicy) DeepCopyObject() runtime.Object {
 
 func (in *SchedulerPolicySpec) DeepCopyInto(out *SchedulerPolicySpec) {
 	*out = *in
+	if in.CPUWeight != nil {
+		in, out := &in.CPUWeight, &out.CPUWeight
+		*out = new(int32)
+		**out = **in
+	}
+	if in.MemoryWeight != nil {
+		in, out := &in.MemoryWeight, &out.MemoryWeight
+		*out = new(int32)
+		**out = **in
+	}
 	if in.RecoveryThreshold != nil {
 		in, out := &in.RecoveryThreshold, &out.RecoveryThreshold
 		*out = new(int32)

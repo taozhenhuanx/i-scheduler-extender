@@ -28,8 +28,8 @@ const autoCordonAnnotation = "scheduler.example.com/auto-cordoned"
 
 type Config struct {
 	CheckInterval       time.Duration
-	CPUWeight           string
-	MemoryWeight        string
+	CPUWeight           float64
+	MemoryWeight        float64
 	NodeSelector        map[string]string
 	IgnoreNodes         map[string]struct{}
 	HighThreshold       float64
@@ -56,8 +56,8 @@ func New(client kubernetes.Interface, dynamicClient dynamic.Interface, config Co
 	if client == nil || dynamicClient == nil {
 		return nil, fmt.Errorf("kubernetes and dynamic clients are required")
 	}
-	cpuWeight, memoryWeight, err := nodeusage.ParseWeights(config.CPUWeight, config.MemoryWeight)
-	if err != nil {
+	// CR 百分比只在 API 边界转换；负载保护和 Extender 使用相同的比例单位。
+	if err := nodeusage.ValidateWeights(config.CPUWeight, config.MemoryWeight); err != nil {
 		return nil, err
 	}
 	if config.RecoveryThreshold < 0 {
@@ -70,8 +70,8 @@ func New(client kubernetes.Interface, dynamicClient dynamic.Interface, config Co
 		client:        client,
 		dynamicClient: dynamicClient,
 		config:        config,
-		cpuWeight:     cpuWeight,
-		memoryWeight:  memoryWeight,
+		cpuWeight:     config.CPUWeight,
+		memoryWeight:  config.MemoryWeight,
 	}, nil
 }
 

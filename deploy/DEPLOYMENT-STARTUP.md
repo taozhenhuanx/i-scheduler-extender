@@ -2,7 +2,7 @@
 
 ## 1. 方案说明
 
-进程由 Kubebuilder/controller-runtime manager 管理。集群级 `SchedulerPolicy/cluster` 是调度策略的期望状态；controller 监听策略和 Node 变化，并按 CR 的 spec 协调节点负载保护和 Scheduler Extender 的打分权重。同一 manager 还托管 Scheduler Extender HTTP 接口。调度打分和节点保护通过 `metrics.k8s.io/v1beta1` 读取节点实际 CPU 和内存使用率。调度 Filter 以节点实测内存为基线，加入正在 Bind 的临时预约和新 Pod 预算；新 Pod 优先使用正数 request，没有正数 request 时回退到 limit。超过节点 Allocatable 的 80% 时标记节点并拒绝新 Pod，降至 75% 后解除标记。
+进程由 Kubebuilder/controller-runtime manager 管理。集群级 `SchedulerPolicy/cluster` 是调度策略的期望状态；controller 监听策略和 Node 变化，并按 CR 的 spec 协调节点负载保护和 Scheduler Extender 的打分权重。同一 manager 还托管 Scheduler Extender HTTP 接口。调度打分和节点保护通过 `metrics.k8s.io/v1beta1` 读取节点实际 CPU 和内存使用率。Filter/Bind 使用节点实测内存、尚未被采样覆盖的预约及新 Pod 预算；新 Pod 优先使用正数 request，没有正数 request 时回退到 limit。预计占用超过 Allocatable 的 80% 时标记并排除节点；当前值加预约降至 75% 以下且新 Pod 不会突破 80% 时解除标记。
 
 80% 是调度预测门槛，不是物理内存绝对上限：Metrics API 存在采样延迟，Pod 可能超过 request，且未经过此 Extender 的调度路径不受拦截。实际拒绝由 Extender 的 Filter/Bind 执行。
 
@@ -11,6 +11,33 @@
 - `make deploy`：通过 Kubebuilder 的 Kustomize 配置安装 CRD、manager 和 Extender Service；首次部署还需要创建 `SchedulerPolicy/cluster`。
 - `manifest.yaml`：在一个 Deployment 中运行自定义 `kube-scheduler` 和 Extender。业务 Pod 需要设置 `schedulerName: i-scheduler-extender`。
 - `manifest-integrated.yaml`：只运行 Extender，复用已有 kube-scheduler。需要把 Extender 配置加入已有 scheduler，业务 Pod 使用默认 scheduler。
+
+### 单实例接管和启动旁路
+
+保持 `replicas: 1` 和 `Recreate`。只有 leader 在完成当前策略加载、重建过渡期内存预算并开始监听 HTTP 后，`/readyz` 才返回成功；standby 不监听调度端口。升级时旧 Pod 先退出，新 leader 再初始化并接管，期间依赖 Extender 的新调度会暂停。
+
+若默认 kube-scheduler 已接入此 Extender，新 Operator Pod 也会依赖该服务完成调度。必须在首次接入默认 scheduler 前为 Operator 配置启动旁路，并在后续升级中保留。`config/bootstrap` 在 Pod 中指定 `nodeName`，使 kubelet 直接接管；`extenders` 是 kube-scheduler 所有 profile 共用的配置，单纯新增一个 profile 不能绕过它。
+
+当前单节点服务器使用 `m1`。在其他集群部署前，先修改 [manager_bootstrap_patch.yaml](../config/bootstrap/manager_bootstrap_patch.yaml) 中的 `nodeName` 为实际可用节点，确认该节点有运行 Operator 的容量，然后渲染部署：
+
+```bash
+kubectl get nodes
+# 修改 patch 中的节点名；渲染检查 nodeName 和 Recreate。
+kubectl kustomize config/bootstrap > /tmp/i-scheduler-extender-bootstrap.yaml
+# 镜像构建并推送后，设置实际镜像地址并部署同一个 bootstrap 入口。
+make deploy-bootstrap IMG=registry.example.com/platform/i-scheduler-extender:v1
+kubectl -n i-scheduler-extender-system rollout status deployment/i-scheduler-extender-controller-manager
+```
+
+此入口包含 CRD、RBAC、manager 和 Service；首次安装仍需创建 `SchedulerPolicy/cluster`。采用此入口后，升级继续使用 `make deploy-bootstrap`；`make deploy` 使用 `config/default`，不会自动包含节点旁路。`nodeName` 会固定 Operator 的运行节点并绕过 scheduler 的节点选择，节点失效时需修改该字段；该方式适合当前单节点部署。
+
+使用旧的 `deploy/manifest-integrated.yaml` 时，需要在其 Deployment 的 `spec.template.spec` 添加同样的 `nodeName` 后部署。独立 scheduler 的组合清单可由未接入 Extender 的默认 scheduler 启动。
+
+### 内存预算接管
+
+Bind 前按 Pod UID 登记内存预算，设置 `nodeName` 后继续保留。所有应用容器与可重启 init 容器启动，且 NodeMetrics 的完整采样窗口覆盖其启动时间后才释放；启动等待不使用固定 TTL 清账。Pod 删除、终止或 UID 替换时清理旧预约。新 leader 在监听 HTTP 前重建未被采样覆盖的已绑定 Pod 预算，稳定 Pod 使用实测内存。
+
+内存准入要求指标包含有效 `timestamp` 和 `window`，样本不超过 2 分钟，最多允许 10 秒的未来时钟偏差。过旧、无效或缺失指标会阻止对应节点准入。Bind 超时或冲突时保留预约，同一 Pod 只重试原节点，避免结果不确定时丢失旧节点预算。
 
 自建集群可以根据控制面权限选择方式。ACK 托管集群通常不能修改控制面 kube-scheduler，建议使用第一种方式。
 

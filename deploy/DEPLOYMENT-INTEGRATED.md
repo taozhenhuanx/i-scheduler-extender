@@ -21,6 +21,8 @@ Scheduler Extender 本身只是 HTTP 服务，不能脱离 kube-scheduler 工作
 
 这样不需要额外运行一个 kube-scheduler，业务 Pod 也不需要再写 `schedulerName`。所有经过默认调度器的 Pod 都会经过该 extender 的 Filter、Prioritize 和 Bind 阶段，请先确认这是期望的行为。
 
+默认 scheduler 接入 Extender 前，必须为 Operator 配置启动旁路，确保 `Recreate` 升级时新实例可以启动。推荐使用 Kubebuilder 的 [config/bootstrap](../config/bootstrap/kustomization.yaml) 入口，根据实际节点修改 patch 中的 `nodeName`；当前服务器为 `m1`。`nodeName` 使 kubelet 直接接管 Pod，固定运行节点。kube-scheduler 的 `extenders` 在所有 profile 间共用，因此新增 profile 不能绕过服务。完整操作见 [单实例接管和启动旁路](DEPLOYMENT-STARTUP.md#单实例接管和启动旁路)。
+
 ## 2. 前置条件
 
 - 具有修改控制平面 kube-scheduler 配置的权限；
@@ -270,11 +272,13 @@ kubectl get pod -o wide
 kubectl describe pod -l app=test
 ```
 
-调度打分按节点实时加权 CPU、内存使用率计算，不需要给节点添加优先级标签。Filter 以节点实测内存为基线，加入正在 Bind 的临时预约和新 Pod 预算；新 Pod 优先使用正数 request，没有正数 request 时回退到 limit。预估调度后内存超过 80% 时标记并排除节点，实测内存降到 75% 后解除标签。Pod 必须声明正数的内存 request 或 limit。部署前确认 `kubectl top nodes` 正常，ServiceAccount 可以读取 `metrics.k8s.io/nodes` 和集群 Pod 列表。
+调度打分按节点实时加权 CPU、内存使用率计算，不需要给节点添加优先级标签。Filter/Bind 使用实测内存、尚未被采样覆盖的预约及新 Pod 预算；预算优先用正数 request，没有正数 request 时回退 limit。预计占用超过 80% 时标记并排除节点；当前值加预约降至 75% 以下且新 Pod 不会突破 80% 时解除标签。部署前确认 `kubectl top nodes` 正常，ServiceAccount 可以读取 `metrics.k8s.io/nodes` 和集群 Pod 列表。
 
 80% 是基于 Metrics API 实测内存和新 Pod 预算的调度预测门槛，不是节点物理内存的绝对上限。request 小于 limit 时，新 Pod 的增量按 request 计算，因此保留超卖空间；没有正数 request 时使用 limit。指标有采样延迟，Pod 可能超过 request（特别是没有 limit 时），未经过此 Extender 的调度路径也不会被它拦截。`scheduler.example.com/memory-blocked=true` 标签用于识别和观测，实际调度拦截由 Extender 的 Filter/Bind 执行。
 
-内存预约保存在 Extender 进程内，因此请保持 `replicas: 1`。清单使用 `Recreate`，避免升级期间新旧实例同时接收调度请求。
+内存预约按 Pod UID 保存在 leader 进程内，设置 nodeName 不会立即释放。应用容器及可重启 init 容器启动后，新的 NodeMetrics 完整窗口覆盖启动时间才释放；启动等待无固定清账 TTL，删除、终止或 UID 替换时清理。新 leader 在开放 HTTP 前重建过渡期预算。指标须有有效 timestamp/window 且不超过 2 分钟，过旧或无效指标阻止节点准入。
+
+保持 `replicas: 1` 和 `Recreate`。leader 初始化完成且 HTTP 开始监听后才 Ready，升级期间依赖 Extender 的新调度会暂停。使用本文旧清单时，部署前在 `spec.template.spec` 添加实际可用节点的 `nodeName`，并保留到后续升级；使用 Kubebuilder manager 时通过 `config/bootstrap` 入口配置旁路。
 
 正常情况下，Pod 的 `Scheduled` 事件来源会显示默认调度器，但调度请求也会出现在 extender 日志中；调度结果仍受该 extender 的 Filter/Prioritize/Bind 逻辑影响。
 
