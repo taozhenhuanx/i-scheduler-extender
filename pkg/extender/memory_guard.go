@@ -14,14 +14,14 @@ import (
 )
 
 const (
-	memoryBlockedLabel = "scheduler.example.com/memory-blocked"
+	memoryBlockedLabel = nodeusage.MemoryBlockedLabel
 	// 80% 是阻止新 Pod 的阈值；降到 75% 才解除标签，用滞回减少标签反复切换。
 	memoryBlockThresholdPercent = 80.0
 	memoryRecoveryPercent       = 75.0
 	podMemoryCacheTTL           = time.Second
 	// 指标超过两分钟或明显来自未来时停止准入，不能用旧样本释放预留。
-	memorySampleMaxAge = 2 * time.Minute
-	memoryClockSkew    = 10 * time.Second
+	memorySampleMaxAge = nodeusage.MemorySampleMaxAge
+	memoryClockSkew    = nodeusage.MemoryClockSkew
 )
 
 type memoryGuardDecision uint8
@@ -62,30 +62,7 @@ type pendingMemoryReservation struct {
 
 // memorySampleStart 返回采样窗口起点。整个窗口都晚于容器启动，才能确认实测值已接替预算。
 func memorySampleStart(metric map[string]interface{}, now time.Time) (time.Time, error) {
-	timestamp, ok := metric["timestamp"].(string)
-	if !ok {
-		return time.Time{}, fmt.Errorf("missing metrics timestamp")
-	}
-	sampledAt, err := time.Parse(time.RFC3339Nano, timestamp)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid metrics timestamp: %w", err)
-	}
-	if sampledAt.After(now.Add(memoryClockSkew)) || now.Sub(sampledAt) > memorySampleMaxAge {
-		return time.Time{}, fmt.Errorf("metrics timestamp %s is stale or in the future", timestamp)
-	}
-	window, ok := metric["window"].(string)
-	if !ok {
-		return time.Time{}, fmt.Errorf("missing metrics window")
-	}
-	duration, err := time.ParseDuration(window)
-	if err != nil || duration <= 0 || duration > memorySampleMaxAge {
-		return time.Time{}, fmt.Errorf("invalid metrics window %q", window)
-	}
-	// 时钟偏差只用于接受样本，不允许未来样本提前覆盖尚未发生的容器启动。
-	if sampledAt.After(now) {
-		sampledAt = now
-	}
-	return sampledAt.Add(-duration), nil
+	return nodeusage.MemorySampleStart(metric, now)
 }
 
 func terminalPod(pod *corev1.Pod) bool {

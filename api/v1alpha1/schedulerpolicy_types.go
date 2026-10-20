@@ -72,14 +72,17 @@ type SchedulerPolicySpec struct {
 	// +kubebuilder:validation:Minimum=0
 	RecoveryThreshold *int32 `json:"recoveryThreshold,omitempty"`
 
-	// MinSchedulableNodes is the minimum number of eligible nodes kept schedulable.
-	// MinSchedulableNodes 指定策略选中的节点中至少保留多少个可调度节点。
+	// MinSchedulableNodes prevents new cordons from reducing healthy, available managed nodes below this count.
+	// MinSchedulableNodes 阻止新增 cordon 将受管可用节点减少到该值以下。
+	// 可用节点须 Ready、未删除、未 cordon、指标新鲜有效，且无内存保护标记及 NoSchedule/NoExecute taint。
+	// 现有故障导致数量不足时停止新增 cordon，该字段不会自动修复故障或解除人工 cordon。
 	// +kubebuilder:default=4
 	// +kubebuilder:validation:Minimum=1
 	MinSchedulableNodes int32 `json:"minSchedulableNodes,omitempty"`
 
 	// TopNodesCount limits cordon decisions to the most heavily utilized eligible nodes.
 	// TopNodesCount 限制每轮参与 cordon 判断的节点数量，只考虑负载最高的前 N 个节点。
+	// 排名只包含当前受管可用节点；无效指标或故障节点不占候选名额。
 	// +kubebuilder:default=9
 	// +kubebuilder:validation:Minimum=1
 	TopNodesCount int32 `json:"topNodesCount,omitempty"`
@@ -87,11 +90,13 @@ type SchedulerPolicySpec struct {
 	// NodeSelector limits policy evaluation to nodes with all listed labels.
 	// An empty selector matches every node.
 	// NodeSelector 将策略限定到同时匹配所列标签的节点；空选择器匹配所有节点。
+	// 节点退出范围后清理本控制器的自动 cordon；Extender 内存准入仍作用于 scheduler 提供的候选节点。
 	// +kubebuilder:validation:Optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
 	// IgnoreNodes lists node names excluded from policy evaluation.
 	// IgnoreNodes 按节点名称排除节点；被列出的节点不受本策略管理。
+	// 加入忽略列表时清理本控制器的自动 cordon，保留未带自动标记的人工 cordon。
 	// +kubebuilder:validation:Optional
 	IgnoreNodes []string `json:"ignoreNodes,omitempty"`
 }

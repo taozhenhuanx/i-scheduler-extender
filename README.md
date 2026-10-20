@@ -34,6 +34,13 @@ kubectl apply -f config/samples/scheduler_v1alpha1_schedulerpolicy.yaml
 
 策略示例位于 [config/samples/scheduler_v1alpha1_schedulerpolicy.yaml](config/samples/scheduler_v1alpha1_schedulerpolicy.yaml)。创建后可通过 `kubectl get schedulerpolicy cluster -o yaml` 查看状态。控制器状态为 `Ready=True` 表示最近一次协调成功。
 
+### 节点保护与策略更新
+
+- `nodeSelector` 和 `ignoreNodes` 决定 NodeBalancer 的管理范围。节点退出范围后会清理本控制器的自动 cordon；该清理先于 Metrics API 读取执行。Extender 内存准入仍检查 kube-scheduler 提供的候选节点。
+- `minSchedulableNodes` 统计受管范围内 Ready、未删除、未 cordon、指标新鲜有效且没有内存保护标记或 `NoSchedule`/`NoExecute` taint 的节点。已有故障造成数量不足时停止新增 cordon；此下限不保证每个 Pod 都能调度，因为各 Pod 还有自己的资源需求、亲和性和容忍设置。
+- 缺失或无效指标、节点 cordon/uncordon 失败会汇总到 `Ready=False` 的原因中，并触发重试；其他节点仍继续协调。后续一轮全部成功时恢复 `Ready=True`。CR 的 Ready 表示策略协调结果，HTTP 的 `/readyz` 表示调度服务已可接收请求。
+- `scheduler.example.com/auto-cordoned=true` 表示 cordon 由控制器管理。没有该标记的人工 cordon 会保留；人工 uncordon 后留下的旧标记会清理。管理员要接管已自动 cordon 的节点时，先移除此标记，再执行自己的 cordon，见 [策略配置说明](deploy/NODEBALANCER-CONFIG.md)。
+
 进程启动配置位于 [config/manager/scheduler.yaml](config/manager/scheduler.yaml)，只包含 metrics、健康检查、Extender 监听地址和 leader election 设置。Kubebuilder Kustomize 部署会从该文件生成 ConfigMap。
 
 ```bash

@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"time"
+	"unicode/utf8"
 
 	schedulerv1alpha1 "github.com/lixd96/i-scheduler-extender/api/v1alpha1"
 	"github.com/lixd96/i-scheduler-extender/pkg/extender"
@@ -24,10 +26,11 @@ import (
 )
 
 const (
-	clusterPolicyName  = "cluster"
-	clusterRequestName = "cluster"
-	readyConditionType = "Ready"
-	cleanupFinalizer   = "scheduler.example.com/policy-cleanup"
+	clusterPolicyName        = "cluster"
+	clusterRequestName       = "cluster"
+	readyConditionType       = "Ready"
+	cleanupFinalizer         = "scheduler.example.com/policy-cleanup"
+	conditionMessageMaxRunes = 32768
 )
 
 // +kubebuilder:rbac:groups=scheduler.example.com,resources=schedulerpolicies,verbs=get;list;watch;update;patch
@@ -79,16 +82,16 @@ func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request recon
 		if controllerutil.ContainsFinalizer(policy, cleanupFinalizer) {
 			// 删除策略时恢复本控制器 cordon 的节点，并将 Extender 权重重置为默认值。
 			if err := rebalancer.UncordonAutoCordonedNodes(ctx, r.KubernetesClient); err != nil {
-				return ctrl.Result{}, err
+				return ctrl.Result{}, r.setFailureCondition(ctx, policy, "CleanupError", err)
 			}
 			if err := r.Extender.SetWeights(
 				float64(schedulerv1alpha1.DefaultCPUWeightPercent)/100,
 				float64(schedulerv1alpha1.DefaultMemoryWeightPercent)/100,
 			); err != nil {
-				return ctrl.Result{}, fmt.Errorf("reset Extender weights: %w", err)
+				return ctrl.Result{}, r.setFailureCondition(ctx, policy, "CleanupError", fmt.Errorf("reset Extender weights: %w", err))
 			}
 			if err := r.patchCleanupFinalizer(ctx, policy, false); err != nil {
-				return ctrl.Result{}, fmt.Errorf("remove policy cleanup finalizer: %w", err)
+				return ctrl.Result{}, r.setFailureCondition(ctx, policy, "CleanupError", fmt.Errorf("remove policy cleanup finalizer: %w", err))
 			}
 		}
 		return ctrl.Result{}, nil
@@ -115,10 +118,7 @@ func (r *SchedulerPolicyReconciler) Reconcile(ctx context.Context, request recon
 		err = balancer.Reconcile(ctx)
 	}
 	if err != nil {
-		if statusErr := r.setReadyCondition(ctx, policy, metav1.ConditionFalse, "ReconcileError", err.Error()); statusErr != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcile scheduler policy: %w (update status: %v)", err, statusErr)
-		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, r.setFailureCondition(ctx, policy, "ReconcileError", err)
 	}
 	if err := r.setReadyCondition(ctx, policy, metav1.ConditionTrue, "Reconciled", "scheduler policy was applied"); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update scheduler policy status: %w", err)
@@ -140,6 +140,20 @@ func (r *SchedulerPolicyReconciler) patchCleanupFinalizer(ctx context.Context, p
 	return r.Patch(ctx, updated, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
+// setFailureCondition 保留节点操作失败和状态写入失败的错误链，让协调器自动重试。
+// 删除清理失败时不移除 finalizer；下一轮继续恢复剩余节点，避免 CR 仍显示上一轮的 Ready=True。
+func (r *SchedulerPolicyReconciler) setFailureCondition(
+	ctx context.Context,
+	policy *schedulerv1alpha1.SchedulerPolicy,
+	reason string,
+	failure error,
+) error {
+	if err := r.setReadyCondition(ctx, policy, metav1.ConditionFalse, reason, failure.Error()); err != nil {
+		return errors.Join(failure, fmt.Errorf("update scheduler policy status: %w", err))
+	}
+	return failure
+}
+
 // setReadyCondition 只在状态变化时写回 status，避免重复更新产生无意义事件。
 func (r *SchedulerPolicyReconciler) setReadyCondition(
 	ctx context.Context,
@@ -150,6 +164,11 @@ func (r *SchedulerPolicyReconciler) setReadyCondition(
 ) error {
 	updated := policy.DeepCopy()
 	updated.Status.ObservedGeneration = policy.Generation
+	// 多节点错误可能超过 Condition schema 的消息上限；仅截断状态消息，返回错误保留完整详情。
+	if utf8.RuneCountInString(message) > conditionMessageMaxRunes {
+		const suffix = "\n... additional errors omitted; see controller logs"
+		message = string([]rune(message)[:conditionMessageMaxRunes-utf8.RuneCountInString(suffix)]) + suffix
+	}
 	meta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
 		Type:               readyConditionType,
 		Status:             status,
@@ -161,7 +180,8 @@ func (r *SchedulerPolicyReconciler) setReadyCondition(
 		reflect.DeepEqual(updated.Status.Conditions, policy.Status.Conditions) {
 		return nil
 	}
-	return r.Status().Update(ctx, updated)
+	// 只补丁更新本轮状态，并以 resourceVersion 检测并发更新，避免覆盖其他协调产生的状态。
+	return r.Status().Patch(ctx, updated, client.MergeFromWithOptions(policy, client.MergeFromWithOptimisticLock{}))
 }
 
 // balancerConfig 将 CR 字段转换成运行时配置，并校验需要联合判断的策略约束。

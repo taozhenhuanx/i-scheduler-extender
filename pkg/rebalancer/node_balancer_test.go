@@ -31,9 +31,12 @@ func TestBalancerCordonUsesZeroAndOnePercentWeights(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			node := corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{Name: "busy"},
-				Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
-					corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("100Mi"),
-				}},
+				Status: corev1.NodeStatus{
+					Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+					Allocatable: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("100Mi"),
+					},
+				},
 			}
 			spare := node.DeepCopy()
 			spare.Name = "spare"
@@ -41,8 +44,9 @@ func TestBalancerCordonUsesZeroAndOnePercentWeights(t *testing.T) {
 			metrics := func(name, cpu, memory string) *unstructured.Unstructured {
 				return &unstructured.Unstructured{Object: map[string]interface{}{
 					"apiVersion": "metrics.k8s.io/v1beta1", "kind": "NodeMetrics",
-					"metadata": map[string]interface{}{"name": name},
-					"usage":    map[string]interface{}{"cpu": cpu, "memory": memory},
+					"metadata":  map[string]interface{}{"name": name},
+					"usage":     map[string]interface{}{"cpu": cpu, "memory": memory},
+					"timestamp": time.Now().UTC().Format(time.RFC3339Nano), "window": "30s",
 				}}
 			}
 			dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),

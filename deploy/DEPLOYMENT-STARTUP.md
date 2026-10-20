@@ -90,9 +90,9 @@ kubectl apply -f config/samples/scheduler_v1alpha1_schedulerpolicy.yaml
 
 ### Top N 语义
 
-`spec.topNodesCount: 9` 是硬限制：程序按综合使用率从高到低排序，只对前 9 个节点做高负载 cordon 判断。第 10 个节点即使使用率达到 95%，也不会因为本轮 Top N 规则被新 cordon。
+`spec.topNodesCount: 9` 是硬限制：程序将受管可用节点按综合使用率从高到低排序，只对前 9 个节点做高负载 cordon 判断。无效指标或故障节点不占名额；该排序的第 10 个节点即使使用率达到 95%，也不会因为本轮 Top N 规则被新 cordon。
 
-如果希望所有受管节点都有机会参与处理，应将它设置为不小于白名单节点数量。`spec.minSchedulableNodes` 优先级更高，不能因为 Top N 导致可调度节点少于该值。
+如果希望所有受管节点都有机会参与处理，应将它设置为不小于白名单节点数量。`spec.minSchedulableNodes` 阻止新增 cordon 将受管可用节点降到下限以下；可用节点须 Ready、未删除、未 cordon、指标有效且新鲜，且无内存保护标记及 `NoSchedule`/`NoExecute` taint。已有故障导致数量不足时停止新增 cordon。
 
 ## 5. 方式一：独立 kube-scheduler
 
@@ -262,22 +262,25 @@ ACK 部署注意事项：
 每个检查周期执行：
 
 ```text
-读取 Metrics API
+清理退出策略范围节点的自动 cordon 和过期标记
+    -> 读取 Metrics API，排除缺失、无效或过期的指标
     -> CPU 10% + 内存 90% 计算综合使用率
     -> 按综合使用率降序排序
     -> 取 Top N
     -> 超过 highThreshold 的节点执行 cordon
-    -> 至少保留 minSchedulableNodes 个可调度节点
+    -> 新增 cordon 不得将受管可用节点降到 minSchedulableNodes 以下
 ```
 
-程序只修改：
+程序通过补丁更新 Node 的调度状态和 `scheduler.example.com/auto-cordoned` 管理标记，例如：
 
 ```yaml
 spec:
   unschedulable: true
 ```
 
-不会驱逐已有 Pod。只有带有 `scheduler.example.com/auto-cordoned=true` 标记的节点，才可能被本程序自动 uncordon；人工 cordon 的节点不会被程序恢复。
+不会驱逐已有 Pod。节点退出 `nodeSelector` 或加入 `ignoreNodes` 时，清理本控制器的自动 cordon；没有自动标记的人工 cordon 保留。管理员接管已自动 cordon 的节点时须先移除自动标记，操作见 [策略配置说明](NODEBALANCER-CONFIG.md#管理员接管节点)。
+
+缺失/无效指标及 cordon/uncordon 操作失败会汇总到 CR 的 `Ready=False` 并触发重试，其他节点继续处理；后续完整成功时恢复 `Ready=True`。此状态反映策略协调结果，HTTP `/readyz` 反映 Extender 服务是否已完成初始化并监听。
 
 ## 9. 检查、升级和回滚
 
