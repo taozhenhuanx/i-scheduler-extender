@@ -4,6 +4,10 @@
 
 ## 调度行为
 
+完整流程、内存预算生命周期、节点保护及本机验证步骤见 [调度逻辑与本机集群验证](deploy/SCHEDULING-LOGIC.md)。
+
+本次镜像、集群部署进度及执行命令见 [2026-10-20 本机部署记录](deploy/DEPLOYMENT-20261020.md)。
+
 - Filter 使用节点实测内存、尚未被采样覆盖的 Pod 预留和待调度 Pod 的内存预算估算调度后的内存占用；超过 Allocatable 的 80% 时给节点添加 `scheduler.example.com/memory-blocked=true` 并排除该节点。
 - 节点实测内存加过渡期预留降到 75% 或以下，且新 Pod 放入后不超过 80% 时，Filter 会清除该标签并重新允许调度。
 - Prioritize 按节点实际 CPU、内存使用量占 Allocatable 的比例计算加权负载。
@@ -60,13 +64,15 @@ Eureka 可使用 Extender 的 `GET /health` 健康检查接口；服务返回 HT
 
 ## 验证调度
 
-先确认指标可用：
+默认调度器集成方式下，先确认实际镜像、策略状态和指标：
 
 ```bash
+kubectl -n i-scheduler-extender-system get pods -o wide
+kubectl get schedulerpolicy cluster -o yaml
 kubectl top nodes
 ```
 
-创建一个使用已配置调度器的 Pod，无需给节点添加标签：
+创建一个小 Pod，省略 `schedulerName` 使用 `default-scheduler`，无需给节点添加标签：
 
 ```yaml
 apiVersion: v1
@@ -74,7 +80,7 @@ kind: Pod
 metadata:
   name: scheduler-extender-test
 spec:
-  schedulerName: i-scheduler-extender
+  restartPolicy: Never
   containers:
     - name: test
       image: busybox:1.36
@@ -90,5 +96,11 @@ spec:
 
 ```bash
 kubectl get pod scheduler-extender-test -o wide
-kubectl -n kube-system logs deployment/i-scheduler-extender -c i-scheduler-extender --tail=100
+kubectl describe pod scheduler-extender-test
+kubectl -n i-scheduler-extender-system logs deployment/i-scheduler-extender-controller-manager \
+  -c manager --since=10m --tail=100
 ```
+
+结合默认 scheduler 的 Extender 配置、调度事件和 Manager 的 `bound pod` 日志确认链路。独立 scheduler 组合部署仍需要设置 `schedulerName: i-scheduler-extender`，并查看 `kube-system` 中对应 Deployment 的日志。
+
+查看 Filter/Prioritize HTTP 返回值、验证内存门槛而不分配大内存，以及 Pending 排查，见 [本机集群验证](deploy/SCHEDULING-LOGIC.md#6-在当前本机集群验证)。

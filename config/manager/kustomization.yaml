@@ -10,4 +10,4 @@ generatorOptions:
 images:
 - name: controller
   newName: lixd96/i-scheduler-extender
-  newTag: operator-test-live-usage
+  newTag: operator-round2-8ba07ad
