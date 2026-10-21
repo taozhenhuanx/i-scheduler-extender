@@ -4,9 +4,9 @@
 
 ## 调度行为
 
-完整流程、内存预算生命周期、节点保护及本机验证步骤见 [调度逻辑与本机集群验证](deploy/SCHEDULING-LOGIC.md)。
+完整流程、内存预算生命周期、节点保护及本机验证步骤见 [调度逻辑与本机集群验证](deploy/调度逻辑与验证.md)。
 
-本次镜像、集群部署进度及执行命令见 [2026-10-20 本机部署记录](deploy/DEPLOYMENT-20261020.md)。
+本次镜像、集群部署进度及执行命令见 [2026-10-20 本机部署记录](deploy/2026-10-20-本机集群部署记录.md)。
 
 - Filter 使用节点实测内存、尚未被采样覆盖的 Pod 预留和待调度 Pod 的内存预算估算调度后的内存占用；超过 Allocatable 的 80% 时给节点添加 `scheduler.example.com/memory-blocked=true` 并排除该节点。
 - 节点实测内存加过渡期预留降到 75% 或以下，且新 Pod 放入后不超过 80% 时，Filter 会清除该标签并重新允许调度。
@@ -43,7 +43,7 @@ kubectl apply -f config/samples/scheduler_v1alpha1_schedulerpolicy.yaml
 - `nodeSelector` 和 `ignoreNodes` 决定 NodeBalancer 的管理范围。节点退出范围后会清理本控制器的自动 cordon；该清理先于 Metrics API 读取执行。Extender 内存准入仍检查 kube-scheduler 提供的候选节点。
 - `minSchedulableNodes` 统计受管范围内 Ready、未删除、未 cordon、指标新鲜有效且没有内存保护标记或 `NoSchedule`/`NoExecute` taint 的节点。已有故障造成数量不足时停止新增 cordon；此下限不保证每个 Pod 都能调度，因为各 Pod 还有自己的资源需求、亲和性和容忍设置。
 - 缺失或无效指标、节点 cordon/uncordon 失败会汇总到 `Ready=False` 的原因中，并触发重试；其他节点仍继续协调。后续一轮全部成功时恢复 `Ready=True`。CR 的 Ready 表示策略协调结果，HTTP 的 `/readyz` 表示调度服务已可接收请求。
-- `scheduler.example.com/auto-cordoned=true` 表示 cordon 由控制器管理。没有该标记的人工 cordon 会保留；人工 uncordon 后留下的旧标记会清理。管理员要接管已自动 cordon 的节点时，先移除此标记，再执行自己的 cordon，见 [策略配置说明](deploy/NODEBALANCER-CONFIG.md)。
+- `scheduler.example.com/auto-cordoned=true` 表示 cordon 由控制器管理。没有该标记的人工 cordon 会保留；人工 uncordon 后留下的旧标记会清理。管理员要接管已自动 cordon 的节点时，先移除此标记，再执行自己的 cordon，见 [策略配置说明](deploy/节点保护策略配置.md)。
 
 进程启动配置位于 [config/manager/scheduler.yaml](config/manager/scheduler.yaml)，只包含 metrics、健康检查、Extender 监听地址和 leader election 设置。Kubebuilder Kustomize 部署会从该文件生成 ConfigMap。
 
@@ -54,9 +54,9 @@ make deploy IMG=registry.example.com/platform/i-scheduler-extender:v1
 
 `make deploy` 会安装 CRD、manager 和 Extender Service；首次部署后仍需应用上面的 `SchedulerPolicy` 示例对象。
 
-默认 kube-scheduler 已接入此 Extender 时，先根据实际节点修改 [bootstrap patch](config/bootstrap/manager_bootstrap_patch.yaml)，再使用 `make deploy-bootstrap IMG=...` 部署和升级。此入口通过 `nodeName` 保证 Operator 能在自身 HTTP 服务未启动时运行；当前服务器的示例节点为 `m1`，操作细节见 [启动旁路](deploy/DEPLOYMENT-STARTUP.md#单实例接管和启动旁路)。
+默认 kube-scheduler 已接入此 Extender 时，先根据实际节点修改 [bootstrap patch](config/bootstrap/manager_bootstrap_patch.yaml)，再使用 `make deploy-bootstrap IMG=...` 部署和升级。此入口通过 `nodeName` 保证 Operator 能在自身 HTTP 服务未启动时运行；当前服务器的示例节点为 `m1`，操作细节见 [启动旁路](deploy/部署指南.md#单实例接管和启动旁路)。
 
-当前分支使用 Kubebuilder 的 `config/` 管理 Operator 部署资源，并将 Extender 接入集群已有的默认 kube-scheduler。部署、控制平面配置、升级和卸载步骤见 [部署文档](deploy/DEPLOYMENT-STARTUP.md)。
+当前分支使用 Kubebuilder 的 `config/` 管理 Operator 部署资源，并将 Extender 接入集群已有的默认 kube-scheduler。部署、控制平面配置、升级和卸载步骤见 [部署文档](deploy/部署指南.md)。
 
 Kubebuilder 部署的 Extender Service 地址为 `http://i-scheduler-extender-http.i-scheduler-extender-system.svc:8080`，可填入已有 kube-scheduler 的 extender `urlPrefix`。
 
@@ -103,4 +103,4 @@ kubectl -n i-scheduler-extender-system logs deployment/i-scheduler-extender-cont
 
 结合默认 scheduler 的 Extender 配置、调度事件和 Manager 的 `bound pod` 日志确认链路。
 
-查看 Filter/Prioritize HTTP 返回值、验证内存门槛而不分配大内存，以及 Pending 排查，见 [本机集群验证](deploy/SCHEDULING-LOGIC.md#6-在当前本机集群验证)。
+查看 Filter/Prioritize HTTP 返回值、验证内存门槛而不分配大内存，以及 Pending 排查，见 [本机集群验证](deploy/调度逻辑与验证.md#6-在当前本机集群验证)。
