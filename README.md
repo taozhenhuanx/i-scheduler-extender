@@ -1,5 +1,7 @@
 # Kubernetes Scheduler Operator and Extender
 
+项目源码导览、架构图与关键调用路径见 [项目学习索引](docs/learning/README.md)。
+
 项目骨架由 Kubebuilder v4 初始化，使用 controller-runtime manager 运行 `SchedulerPolicy` 自定义资源对应的 controller，并提供 HTTP Scheduler Extender 接口。controller 监听集群级 `SchedulerPolicy/cluster` 和 Node 变化，根据 CR 的 `spec` 协调节点 cordon 状态及 Extender 打分权重；Extender 读取 `metrics.k8s.io` 的节点负载动态打分，并阻止预计会超过内存门槛的 Pod 落到该节点。
 
 ## 调度行为
